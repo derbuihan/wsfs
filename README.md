@@ -7,7 +7,7 @@ A FUSE-based file system to interact with Databricks workspace files and directo
 - [x] Mount Databricks workspace
 - [x] List files and directories
 - [x] Read files
-- [] Write files (in progress)
+- [ ] Write files (in progress)
 
 
 ## Usage
