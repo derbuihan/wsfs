@@ -1,0 +1,29 @@
+{
+  "name": "WSFS Analysis Environment",
+  "image": "ubuntu:24.04",
+  "remoteUser": "vscode",
+
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": true,
+      "username": "vscode",
+      "userUid": "1001",
+      "userGid": "1001"
+    }
+  },
+
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y gdb binutils file strace ltrace build-essential vim nano",
+
+  "privileged": true,
+  "capAdd": ["SYS_ADMIN"],
+  "securityOpt": ["apparmor:unconfined"],
+
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh"
+      },
+      "extensions": ["ms-vscode.cpptools", "saoudrizwan.claude-dev", "golang.go"]
+    }
+  }
+}
