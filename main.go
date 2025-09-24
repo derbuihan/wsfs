@@ -7,7 +7,9 @@ import (
 	"log"
 	"os"
 	"path"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/databricks/databricks-sdk-go"
 	"github.com/databricks/databricks-sdk-go/service/workspace"
@@ -15,6 +17,30 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
+
+type CacheEntry struct {
+	Info      *workspace.ObjectInfo
+	Timestamp time.Time
+}
+
+var cache = sync.Map{}
+
+const cacheTTL = 30 * time.Second
+
+func getCachedObjectInfo(path string) (*workspace.ObjectInfo, bool) {
+	if val, ok := cache.Load(path); ok {
+		entry := val.(CacheEntry)
+		if time.Since(entry.Timestamp) < cacheTTL {
+			return entry.Info, true
+		}
+		cache.Delete(path)
+	}
+	return nil, false
+}
+
+func setCachedObjectInfo(path string, info *workspace.ObjectInfo) {
+	cache.Store(path, CacheEntry{Info: info, Timestamp: time.Now()})
+}
 
 type WSNode struct {
 	fs.Inode
@@ -84,10 +110,35 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 		fullPath = "/" + name
 	}
 
+	// Check cache first
+	if info, ok := getCachedObjectInfo(fullPath); ok {
+		if info == nil {
+			return nil, syscall.ENOENT
+		}
+
+		child := n.NewPersistentInode(ctx, &WSNode{
+			client:     n.client,
+			path:       fullPath,
+			objectType: info.ObjectType,
+			size:       info.Size,
+		}, fs.StableAttr{Mode: getMode(info.ObjectType)})
+
+		if info.ObjectType == workspace.ObjectTypeDirectory {
+			out.Mode = 0755 | syscall.S_IFDIR
+		} else {
+			out.Mode = 0644 | syscall.S_IFREG
+			out.Size = uint64(info.Size)
+		}
+
+		return child, 0
+	}
+
 	info, err := n.client.Workspace.GetStatusByPath(ctx, fullPath)
 	if err != nil {
+		setCachedObjectInfo(fullPath, nil)
 		return nil, syscall.ENOENT
 	}
+	setCachedObjectInfo(fullPath, info)
 
 	child := n.NewPersistentInode(ctx, &WSNode{
 		client:     n.client,
@@ -171,6 +222,11 @@ func main() {
 	}
 
 	client := databricks.Must(databricks.NewWorkspaceClient())
+	me, err := client.CurrentUser.Me(context.Background())
+	if err != nil {
+		log.Fatalf("Failed to get current user: %v", err)
+	}
+	log.Printf("Hello, %s! Mounting your Databricks workspace...", me.DisplayName)
 
 	root := &WSNode{
 		client:     client,
@@ -178,7 +234,14 @@ func main() {
 		objectType: workspace.ObjectTypeDirectory,
 	}
 
+	attrTimeout := 30 * time.Second
+	entryTimeout := 30 * time.Second
+	negativeTimeout := 10 * time.Second
+
 	opts := &fs.Options{
+		AttrTimeout:     &attrTimeout,
+		EntryTimeout:    &entryTimeout,
+		NegativeTimeout: &negativeTimeout,
 		MountOptions: fuse.MountOptions{
 			AllowOther: true,
 			Name:       "wsfs",
