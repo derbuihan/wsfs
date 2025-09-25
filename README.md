@@ -36,3 +36,7 @@ $ cd <mount-point>
 $ ls
 Repos  Shared  Users
 ```
+
+## License
+
+GPL-3.0 License. See the [LICENSE](LICENSE) file for details.
