@@ -1,14 +1,21 @@
 {
   "name": "WSFS Analysis Environment",
-  "image": "ubuntu:24.04",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
   "remoteUser": "vscode",
 
   "features": {
     "ghcr.io/devcontainers/features/common-utils:2": {
       "installZsh": true,
+      "installOhMyZsh": true,
+      "installOhMyZshConfig": true,
+      "configureZshAsDefaultShell": true,
+      "upgradePackages": true,
       "username": "vscode",
-      "userUid": "1001",
-      "userGid": "1001"
+      "userUid": "automatic",
+      "userGid": "automatic"
+    },
+    "ghcr.io/devcontainers/features/go:1": {
+      "version": "1.22"
     }
   },
 
@@ -21,7 +28,11 @@
   "customizations": {
     "vscode": {
       "settings": {
-        "terminal.integrated.defaultProfile.linux": "zsh"
+        "terminal.integrated.defaultProfile.linux": "zsh",
+        "editor.formatOnSave": true,
+        "[go]": {
+            "editor.defaultFormatter": "golang.go"
+        }
       },
       "extensions": ["ms-vscode.cpptools", "saoudrizwan.claude-dev", "golang.go"]
     }
