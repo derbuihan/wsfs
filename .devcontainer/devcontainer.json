@@ -16,7 +16,8 @@
     },
     "ghcr.io/devcontainers/features/go:1": {
       "version": "1.22"
-    }
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {}
   },
 
   "postCreateCommand": "sudo apt-get update && sudo apt-get install -y gdb binutils file strace ltrace build-essential vim nano",
