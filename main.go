@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/databricks/databricks-sdk-go"
-	"github.com/databricks/databricks-sdk-go/service/workspace"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -38,22 +37,13 @@ func main() {
 		log.Fatalf("Faild to create Databricks Workspace Files Client: %v", err)
 	}
 
-	req := NewListFilesRequest("/")
-	ctx := context.Background()
-	res, err := wfclient.ListFiles(ctx, req)
+	// Set up Root node
+	root, err := NewRootNode(wfclient, "/")
 	if err != nil {
-		log.Fatalf("Failed to list files: %v", err)
-	}
-	log.Printf("Listed %d files in the root directory", len(res.Objects))
-
-	// Set up FUSE filesystem
-	root := &WSNode{
-		wfClient: wfclient,
-		objInfo: workspace.ObjectInfo{
-			Path: "/",
-		},
+		log.Fatal("Faild to create root node: %v", err)
 	}
 
+	// Mount filesystem
 	attrTimeout := 30 * time.Second
 	entryTimeout := 30 * time.Second
 	negativeTimeout := 10 * time.Second

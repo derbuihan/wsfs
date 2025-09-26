@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"log"
 	"path"
 	"syscall"
@@ -15,7 +14,7 @@ import (
 type WSNode struct {
 	fs.Inode
 	wfClient *WorkspaceFilesClient
-	objInfo  workspace.ObjectInfo
+	fileInfo WSFileInfo
 	data     []byte
 }
 
@@ -26,45 +25,59 @@ var _ = (fs.NodeOpener)((*WSNode)(nil))
 var _ = (fs.NodeReader)((*WSNode)(nil))
 
 func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	switch n.objInfo.ObjectType {
+	log.Printf("Getattr called on path: %s", n.fileInfo.Path)
+	switch n.fileInfo.ObjectType {
 	case workspace.ObjectTypeDirectory:
 		out.Mode = 0755 | syscall.S_IFDIR
 	default:
 		out.Mode = 0644 | syscall.S_IFREG
-		out.Size = uint64(n.objInfo.Size)
-		out.Atime = uint64(n.objInfo.ModifiedAt)
-		out.Ctime = uint64(n.objInfo.ModifiedAt)
-		out.Mtime = uint64(n.objInfo.ModifiedAt)
+		out.Size = uint64(n.fileInfo.Size())
 	}
+
+	modTime := n.fileInfo.ModTime()
+	out.Mtime = uint64(modTime.Unix())
+	out.Atime = out.Mtime
+	out.Ctime = out.Mtime
+
+	out.SetTimeout(60)
+
 	return 0
 }
 
-func (n *WSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	log.Printf("Readdir called on path: %s", n.objInfo.Path)
+func (entry WSDirEntry) ToFuseDirEntry() fuse.DirEntry {
+	mode := uint32(syscall.S_IFREG | 0644)
+	if entry.IsDir() {
+		mode = uint32(syscall.S_IFDIR | 0755)
+	}
 
-	if n.objInfo.ObjectType != workspace.ObjectTypeDirectory && n.objInfo.Path != "/" {
+	return fuse.DirEntry{
+		Name: entry.Name(),
+		Mode: mode,
+	}
+}
+
+func (n *WSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	log.Printf("Readdir called on path: %s", n.fileInfo.Path)
+
+	if !n.fileInfo.IsDir() {
 		return nil, syscall.ENOTDIR
 	}
 
-	entries := []fuse.DirEntry{}
-
-	listReq := NewListFilesRequest(n.objInfo.Path)
-	objects, err := n.wfClient.ListFiles(ctx, listReq)
+	entries, err := n.wfClient.ReadDir(ctx, n.fileInfo.Path)
 	if err != nil {
-		log.Printf("Error listing workspace: %v", err)
 		return nil, syscall.EIO
 	}
 
-	for _, obj := range objects.Objects {
-		name := path.Base(obj.ObjectInfo.Path)
+	fuseEntries := make([]fuse.DirEntry, len(entries))
+	for i, e := range entries {
 		mode := uint32(syscall.S_IFREG)
-		if obj.ObjectInfo.ObjectType == "DIRECTORY" {
+		if e.IsDir() {
 			mode = uint32(syscall.S_IFDIR)
 		}
-		entries = append(entries, fuse.DirEntry{Name: name, Mode: mode})
+		fuseEntries[i] = fuse.DirEntry{Name: e.Name(), Mode: mode}
 	}
 
-	return fs.NewListDirStream(entries), 0
+	return fs.NewListDirStream(fuseEntries), 0
 }
 
 func getMode(objectType workspace.ObjectType) uint32 {
@@ -75,72 +88,66 @@ func getMode(objectType workspace.ObjectType) uint32 {
 }
 
 func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	log.Printf("Lookup called on path: %s/%s", n.objInfo.Path, name)
-	if n.objInfo.ObjectType != workspace.ObjectTypeDirectory && n.objInfo.Path != "/" {
+	log.Printf("Lookup called on path: %s/%s", n.fileInfo.Path, name)
+	if !n.fileInfo.IsDir() {
 		return nil, syscall.ENOTDIR
 	}
 
-	fullPath := path.Join(n.objInfo.Path, name)
-	if n.objInfo.Path == "/" {
-		fullPath = "/" + name
-	}
+	childPath := path.Join(n.fileInfo.Path, name)
 
-	infoReq := NewObjectInfoRequest(fullPath)
-	info, err := n.wfClient.ObjectInfo(ctx, infoReq)
+	info, err := n.wfClient.Stat(ctx, childPath)
 	if err != nil {
-		setCachedObjectInfo(fullPath, nil)
 		return nil, syscall.ENOENT
 	}
 
-	objectInfo := info.WsfsObjectInfo.ObjectInfo
+	wsInfo := info.(WSFileInfo)
 
-	child := n.NewPersistentInode(ctx, &WSNode{
+	childNode := &WSNode{
 		wfClient: n.wfClient,
-		objInfo:  objectInfo,
-	}, fs.StableAttr{Mode: getMode(objectInfo.ObjectType)})
-
-	if objectInfo.ObjectType == workspace.ObjectTypeDirectory {
-		out.Mode = 0755 | syscall.S_IFDIR
-	} else {
-		out.Mode = 0644 | syscall.S_IFREG
-		out.Size = uint64(objectInfo.Size)
+		fileInfo: wsInfo,
 	}
+
+	if wsInfo.IsDir() {
+		out.Mode = syscall.S_IFDIR | 0755
+	} else {
+		out.Mode = syscall.S_IFREG | 0644
+		out.Size = uint64(wsInfo.Size())
+	}
+
+	modTime := wsInfo.ModTime()
+	out.Mtime = uint64(modTime.Unix())
+	out.Atime = out.Mtime
+	out.Ctime = out.Mtime
+
+	out.SetEntryTimeout(60)
+	out.SetAttrTimeout(60)
+
+	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{
+		Mode: uint32(out.Mode),
+	})
 
 	return child, 0
 }
 
 func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	log.Printf("Open called on path: %s", n.objInfo.Path)
-
-	if n.objInfo.ObjectType == workspace.ObjectTypeDirectory {
+	log.Printf("Open called on path: %s", n.fileInfo.Path)
+	if n.fileInfo.IsDir() {
 		return nil, 0, syscall.EISDIR
 	}
 
 	if n.data == nil {
-		resp, err := n.wfClient.workspaceClient.Workspace.Export(ctx, workspace.ExportRequest{
-			Path:   n.objInfo.Path,
-			Format: workspace.ExportFormatSource,
-		})
+		data, err := n.wfClient.ReadAll(ctx, n.fileInfo.Path)
 		if err != nil {
-			log.Printf("Error exporting file: %v", err)
 			return nil, 0, syscall.EIO
 		}
-
-		dec, err := base64.StdEncoding.DecodeString(resp.Content)
-		if err != nil {
-			log.Printf("Error decoding base64 content: %v", err)
-			return nil, 0, syscall.EIO
-		}
-
-		n.data = []byte(dec)
-		// n.size = int64(len(n.data))
+		n.data = data
 	}
 
 	return nil, fuse.FOPEN_KEEP_CACHE, 0
 }
 
 func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	log.Printf("Read called on path: %s, offset: %d, size: %d", n.objInfo.Path, off, len(dest))
+	log.Printf("Read called on path: %s, offset: %d, size: %d", n.fileInfo.Path, off, len(dest))
 
 	if n.data == nil {
 		log.Printf("Data is nil, file might not be opened properly")
@@ -158,4 +165,22 @@ func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off in
 
 	result := n.data[off:end]
 	return fuse.ReadResultData(result), 0
+}
+
+func NewRootNode(wfClient *WorkspaceFilesClient, rootPath string) (*WSNode, error) {
+	info, err := wfClient.Stat(context.Background(), rootPath)
+
+	if err != nil {
+		return nil, err
+	}
+
+	wsInfo := info.(WSFileInfo)
+	if !wsInfo.IsDir() {
+		return nil, syscall.ENOTDIR
+	}
+
+	return &WSNode{
+		wfClient: wfClient,
+		fileInfo: wsInfo,
+	}, nil
 }
