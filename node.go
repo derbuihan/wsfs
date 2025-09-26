@@ -14,11 +14,9 @@ import (
 
 type WSNode struct {
 	fs.Inode
-	wfclient   *WorkspaceFilesClient
-	path       string
-	objectType workspace.ObjectType
-	size       int64
-	data       []byte
+	wfClient *WorkspaceFilesClient
+	objInfo  workspace.ObjectInfo
+	data     []byte
 }
 
 var _ = (fs.NodeGetattrer)((*WSNode)(nil))
@@ -28,26 +26,30 @@ var _ = (fs.NodeOpener)((*WSNode)(nil))
 var _ = (fs.NodeReader)((*WSNode)(nil))
 
 func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	if n.objectType == workspace.ObjectTypeDirectory {
+	switch n.objInfo.ObjectType {
+	case workspace.ObjectTypeDirectory:
 		out.Mode = 0755 | syscall.S_IFDIR
-	} else {
+	default:
 		out.Mode = 0644 | syscall.S_IFREG
-		out.Size = uint64(n.size)
+		out.Size = uint64(n.objInfo.Size)
+		out.Atime = uint64(n.objInfo.ModifiedAt)
+		out.Ctime = uint64(n.objInfo.ModifiedAt)
+		out.Mtime = uint64(n.objInfo.ModifiedAt)
 	}
 	return 0
 }
 
 func (n *WSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	log.Printf("Readdir called on path: %s", n.path)
+	log.Printf("Readdir called on path: %s", n.objInfo.Path)
 
-	if n.objectType != workspace.ObjectTypeDirectory && n.path != "/" {
+	if n.objInfo.ObjectType != workspace.ObjectTypeDirectory && n.objInfo.Path != "/" {
 		return nil, syscall.ENOTDIR
 	}
 
 	entries := []fuse.DirEntry{}
 
-	listReq := NewListFilesRequest(n.path)
-	objects, err := n.wfclient.ListFiles(ctx, listReq)
+	listReq := NewListFilesRequest(n.objInfo.Path)
+	objects, err := n.wfClient.ListFiles(ctx, listReq)
 	if err != nil {
 		log.Printf("Error listing workspace: %v", err)
 		return nil, syscall.EIO
@@ -73,73 +75,50 @@ func getMode(objectType workspace.ObjectType) uint32 {
 }
 
 func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	log.Printf("Lookup called on path: %s/%s", n.path, name)
-	if n.objectType != workspace.ObjectTypeDirectory && n.path != "/" {
+	log.Printf("Lookup called on path: %s/%s", n.objInfo.Path, name)
+	if n.objInfo.ObjectType != workspace.ObjectTypeDirectory && n.objInfo.Path != "/" {
 		return nil, syscall.ENOTDIR
 	}
 
-	fullPath := path.Join(n.path, name)
-	if n.path == "/" {
+	fullPath := path.Join(n.objInfo.Path, name)
+	if n.objInfo.Path == "/" {
 		fullPath = "/" + name
 	}
 
-	// Check cache first
-	if info, ok := getCachedObjectInfo(fullPath); ok {
-		if info == nil {
-			return nil, syscall.ENOENT
-		}
-
-		child := n.NewPersistentInode(ctx, &WSNode{
-			wfclient:   n.wfclient,
-			path:       fullPath,
-			objectType: info.ObjectType,
-			size:       info.Size,
-		}, fs.StableAttr{Mode: getMode(info.ObjectType)})
-
-		if info.ObjectType == workspace.ObjectTypeDirectory {
-			out.Mode = 0755 | syscall.S_IFDIR
-		} else {
-			out.Mode = 0644 | syscall.S_IFREG
-			out.Size = uint64(info.Size)
-		}
-
-		return child, 0
-	}
-
-	info, err := n.wfclient.workspaceClient.Workspace.GetStatusByPath(ctx, fullPath)
+	infoReq := NewObjectInfoRequest(fullPath)
+	info, err := n.wfClient.ObjectInfo(ctx, infoReq)
 	if err != nil {
 		setCachedObjectInfo(fullPath, nil)
 		return nil, syscall.ENOENT
 	}
-	setCachedObjectInfo(fullPath, info)
+
+	objectInfo := info.WsfsObjectInfo.ObjectInfo
 
 	child := n.NewPersistentInode(ctx, &WSNode{
-		wfclient:   n.wfclient,
-		path:       fullPath,
-		objectType: info.ObjectType,
-		size:       info.Size,
-	}, fs.StableAttr{Mode: getMode(info.ObjectType)})
+		wfClient: n.wfClient,
+		objInfo:  objectInfo,
+	}, fs.StableAttr{Mode: getMode(objectInfo.ObjectType)})
 
-	if info.ObjectType == workspace.ObjectTypeDirectory {
+	if objectInfo.ObjectType == workspace.ObjectTypeDirectory {
 		out.Mode = 0755 | syscall.S_IFDIR
 	} else {
 		out.Mode = 0644 | syscall.S_IFREG
-		out.Size = uint64(info.Size)
+		out.Size = uint64(objectInfo.Size)
 	}
 
 	return child, 0
 }
 
 func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	log.Printf("Open called on path: %s", n.path)
+	log.Printf("Open called on path: %s", n.objInfo.Path)
 
-	if n.objectType == workspace.ObjectTypeDirectory {
+	if n.objInfo.ObjectType == workspace.ObjectTypeDirectory {
 		return nil, 0, syscall.EISDIR
 	}
 
 	if n.data == nil {
-		resp, err := n.wfclient.workspaceClient.Workspace.Export(ctx, workspace.ExportRequest{
-			Path:   n.path,
+		resp, err := n.wfClient.workspaceClient.Workspace.Export(ctx, workspace.ExportRequest{
+			Path:   n.objInfo.Path,
 			Format: workspace.ExportFormatSource,
 		})
 		if err != nil {
@@ -154,14 +133,14 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 		}
 
 		n.data = []byte(dec)
-		n.size = int64(len(n.data))
+		// n.size = int64(len(n.data))
 	}
 
 	return nil, fuse.FOPEN_KEEP_CACHE, 0
 }
 
 func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	log.Printf("Read called on path: %s, offset: %d, size: %d", n.path, off, len(dest))
+	log.Printf("Read called on path: %s, offset: %d, size: %d", n.objInfo.Path, off, len(dest))
 
 	if n.data == nil {
 		log.Printf("Data is nil, file might not be opened properly")

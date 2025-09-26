@@ -7,6 +7,7 @@ import (
 
 	"github.com/databricks/databricks-sdk-go"
 	"github.com/databricks/databricks-sdk-go/client"
+	"github.com/databricks/databricks-sdk-go/service/workspace"
 )
 
 type WorkspaceFilesClient struct {
@@ -27,50 +28,56 @@ func NewWorkspaceFilesClient(w *databricks.WorkspaceClient) (*WorkspaceFilesClie
 }
 
 type ListFilesRequest struct {
-	Path        string `json:"path"`
-	IncludeSize *bool  `json:"include_size,omitempty"`
-	Recursive   *bool  `json:"recursive,omitempty"`
+	Path string `json:"path"`
 }
 
 func NewListFilesRequest(path string) ListFilesRequest {
-	return ListFilesRequest{
-		Path:        path,
-		IncludeSize: nil,
-		Recursive:   nil,
-	}
-}
-
-type ObjectInfo struct {
-	ObjectType         string `json:"object_type,omitempty"`
-	Path               string `json:"path,omitempty"`
-	Language           string `json:"language,omitempty"`
-	CreatedAt          int64  `json:"created_at,omitempty"`
-	ModifiedAt         int64  `json:"modified_at,omitempty"`
-	ObjectID           int64  `json:"object_id,omitempty"`
-	BlobPath           string `json:"blob_path,omitempty"`
-	ContentSHA256Hex   string `json:"content_sha256_hex,omitempty"`
-	Size               int64  `json:"size,omitempty"`
-	BlobLocation       string `json:"blob_location,omitempty"`
-	HasWsfsMetadata    bool   `json:"has_wsfs_metadata,omitempty"`
-	RequiresSyncToWsfs bool   `json:"requires_sync_to_wsfs,omitempty"`
-	ResourceID         string `json:"resource_id,omitempty"`
+	return ListFilesRequest{Path: path}
 }
 
 type Object struct {
-	ObjectInfo ObjectInfo `json:"object_info"`
+	ObjectInfo workspace.ObjectInfo `json:"object_info"`
 }
 
 type ListFilesResponse struct {
 	Objects []Object `json:"objects,omitempty"`
 }
 
-func (wf *WorkspaceFilesClient) ListFiles(
-	ctx context.Context,
-	req ListFilesRequest,
-) (*ListFilesResponse, error) {
+func (wf *WorkspaceFilesClient) ListFiles(ctx context.Context, req ListFilesRequest) (*ListFilesResponse, error) {
 	resp := &ListFilesResponse{}
 
 	path := "/api/2.0/workspace-files/list-files"
+	path += fmt.Sprintf("?path=%s", url.QueryEscape(req.Path))
+
+	err := wf.databricksClient.Do(ctx, "GET", path, nil, nil, nil, resp)
+	return resp, err
+}
+
+type ObjectInfoRequest struct {
+	Path string `json:"Path"`
+}
+
+func NewObjectInfoRequest(path string) ObjectInfoRequest {
+	return ObjectInfoRequest{Path: path}
+}
+
+type SingnedUrl struct {
+	Url string `json:"url"`
+}
+
+type WsfsObjectInfo struct {
+	ObjectInfo workspace.ObjectInfo `json:"object_info"`
+	SingnedUrl SingnedUrl           `json:"signed_url"`
+}
+
+type ObjectInfoResponse struct {
+	WsfsObjectInfo WsfsObjectInfo `json:"wsfs_object_info"`
+}
+
+func (wf *WorkspaceFilesClient) ObjectInfo(ctx context.Context, req ObjectInfoRequest) (*ObjectInfoResponse, error) {
+	resp := &ObjectInfoResponse{}
+
+	path := "/api/2.0/workspace-files/object-info"
 	path += fmt.Sprintf("?path=%s", url.QueryEscape(req.Path))
 
 	err := wf.databricksClient.Do(ctx, "GET", path, nil, nil, nil, resp)

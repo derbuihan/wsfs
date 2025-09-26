@@ -48,9 +48,10 @@ func main() {
 
 	// Set up FUSE filesystem
 	root := &WSNode{
-		wfclient:   wfclient,
-		path:       "/",
-		objectType: workspace.ObjectTypeDirectory,
+		wfClient: wfclient,
+		objInfo: workspace.ObjectInfo{
+			Path: "/",
+		},
 	}
 
 	attrTimeout := 30 * time.Second
