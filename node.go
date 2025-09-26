@@ -7,7 +7,6 @@ import (
 	"path"
 	"syscall"
 
-	"github.com/databricks/databricks-sdk-go"
 	"github.com/databricks/databricks-sdk-go/service/workspace"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -15,7 +14,7 @@ import (
 
 type WSNode struct {
 	fs.Inode
-	client     *databricks.WorkspaceClient
+	wfclient   *WorkspaceFilesClient
 	path       string
 	objectType workspace.ObjectType
 	size       int64
@@ -47,21 +46,18 @@ func (n *WSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 
 	entries := []fuse.DirEntry{}
 
-	listReq := workspace.ListWorkspaceRequest{
-		Path: n.path,
-	}
-
-	objects, err := n.client.Workspace.ListAll(ctx, listReq)
+	listReq := NewListFilesRequest(n.path)
+	objects, err := n.wfclient.ListFiles(ctx, listReq)
 	if err != nil {
 		log.Printf("Error listing workspace: %v", err)
 		return nil, syscall.EIO
 	}
 
-	for _, obj := range objects {
-		name := path.Base(obj.Path)
+	for _, obj := range objects.Objects {
+		name := path.Base(obj.ObjectInfo.Path)
 		mode := uint32(syscall.S_IFREG)
-		if obj.ObjectType == workspace.ObjectTypeDirectory {
-			mode = syscall.S_IFDIR
+		if obj.ObjectInfo.ObjectType == "DIRECTORY" {
+			mode = uint32(syscall.S_IFDIR)
 		}
 		entries = append(entries, fuse.DirEntry{Name: name, Mode: mode})
 	}
@@ -94,7 +90,7 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 		}
 
 		child := n.NewPersistentInode(ctx, &WSNode{
-			client:     n.client,
+			wfclient:   n.wfclient,
 			path:       fullPath,
 			objectType: info.ObjectType,
 			size:       info.Size,
@@ -110,7 +106,7 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 		return child, 0
 	}
 
-	info, err := n.client.Workspace.GetStatusByPath(ctx, fullPath)
+	info, err := n.wfclient.workspaceClient.Workspace.GetStatusByPath(ctx, fullPath)
 	if err != nil {
 		setCachedObjectInfo(fullPath, nil)
 		return nil, syscall.ENOENT
@@ -118,7 +114,7 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	setCachedObjectInfo(fullPath, info)
 
 	child := n.NewPersistentInode(ctx, &WSNode{
-		client:     n.client,
+		wfclient:   n.wfclient,
 		path:       fullPath,
 		objectType: info.ObjectType,
 		size:       info.Size,
@@ -142,7 +138,7 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 	}
 
 	if n.data == nil {
-		resp, err := n.client.Workspace.Export(ctx, workspace.ExportRequest{
+		resp, err := n.wfclient.workspaceClient.Workspace.Export(ctx, workspace.ExportRequest{
 			Path:   n.path,
 			Format: workspace.ExportFormatSource,
 		})

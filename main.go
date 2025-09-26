@@ -21,15 +21,34 @@ func main() {
 		log.Fatalf("Usage: %s MOUNTPOINT", os.Args[0])
 	}
 
-	client := databricks.Must(databricks.NewWorkspaceClient())
-	me, err := client.CurrentUser.Me(context.Background())
+	// Set up Databricks client
+	w, err := databricks.NewWorkspaceClient()
+	if err != nil {
+		log.Fatalf("Failed to create Databricks client: %v", err)
+	}
+	me, err := w.CurrentUser.Me(context.Background())
 	if err != nil {
 		log.Fatalf("Failed to get current user: %v", err)
 	}
 	log.Printf("Hello, %s! Mounting your Databricks workspace...", me.DisplayName)
 
+	// Set up Databricks FS client
+	wfclient, err := NewWorkspaceFilesClient(w)
+	if err != nil {
+		log.Fatalf("Faild to create Databricks Workspace Files Client: %v", err)
+	}
+
+	req := NewListFilesRequest("/")
+	ctx := context.Background()
+	res, err := wfclient.ListFiles(ctx, req)
+	if err != nil {
+		log.Fatalf("Failed to list files: %v", err)
+	}
+	log.Printf("Listed %d files in the root directory", len(res.Objects))
+
+	// Set up FUSE filesystem
 	root := &WSNode{
-		client:     client,
+		wfclient:   wfclient,
 		path:       "/",
 		objectType: workspace.ObjectTypeDirectory,
 	}
