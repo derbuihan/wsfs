@@ -2,10 +2,17 @@ package main
 
 import (
 	"io/fs"
+	"log"
 	"path"
 	"sync"
 	"time"
 )
+
+type negativeCacheEntry struct {
+	fs.FileInfo
+}
+
+var negativeEntry fs.FileInfo = &negativeCacheEntry{}
 
 type CacheEntry struct {
 	info       fs.FileInfo
@@ -39,6 +46,11 @@ func (c *Cache) Get(path string) (fs.FileInfo, bool) {
 		return nil, false
 	}
 
+	if entry.info == negativeEntry {
+		log.Panicf("negative cache entry accessed:")
+		return nil, true
+	}
+
 	return entry.info, true
 }
 
@@ -46,8 +58,15 @@ func (c *Cache) Set(path string, info fs.FileInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	var entryInfo fs.FileInfo
+	if info == nil {
+		entryInfo = negativeEntry
+	} else {
+		entryInfo = info
+	}
+
 	expiration := time.Now().Add(c.cacheTTL)
-	c.entries[path] = &CacheEntry{info: info, expiration: expiration}
+	c.entries[path] = &CacheEntry{info: entryInfo, expiration: expiration}
 }
 
 func (c *Cache) Invalidate(filePath string) {

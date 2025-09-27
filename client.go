@@ -106,7 +106,8 @@ func NewWorkspaceFilesClient(w *databricks.WorkspaceClient) (*WorkspaceFilesClie
 }
 
 func (c *WorkspaceFilesClient) Stat(ctx context.Context, filePath string) (fs.FileInfo, error) {
-	if info, found := c.cache.Get(filePath); found {
+	info, found := c.cache.Get(filePath)
+	if found {
 		return info, nil
 	}
 
@@ -121,12 +122,12 @@ func (c *WorkspaceFilesClient) Stat(ctx context.Context, filePath string) (fs.Fi
 		return nil, err
 	}
 
-	info := WSFileInfo{ObjectInfo: resp.WsfsObjectInfo.ObjectInfo}
+	apiInfo := WSFileInfo{ObjectInfo: resp.WsfsObjectInfo.ObjectInfo}
 	if resp.WsfsObjectInfo.SignedURL != nil {
-		info.SignedURL = resp.WsfsObjectInfo.SignedURL.URL
+		apiInfo.SignedURL = resp.WsfsObjectInfo.SignedURL.URL
 	}
-	c.cache.Set(filePath, info)
-	return info, nil
+	c.cache.Set(filePath, apiInfo)
+	return apiInfo, nil
 }
 
 func (c *WorkspaceFilesClient) ReadDir(ctx context.Context, dirPath string) ([]fs.DirEntry, error) {
