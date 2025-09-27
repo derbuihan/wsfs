@@ -1,32 +1,59 @@
 package main
 
 import (
+	"io/fs"
+	"path"
 	"sync"
 	"time"
-
-	"github.com/databricks/databricks-sdk-go/service/workspace"
 )
 
 type CacheEntry struct {
-	Info      *workspace.ObjectInfo
-	Timestamp time.Time
+	info       fs.FileInfo
+	expiration time.Time
 }
 
-var cache = sync.Map{}
+type Cache struct {
+	entries  map[string]*CacheEntry
+	cacheTTL time.Duration
+	mu       sync.Mutex
+}
 
-const cacheTTL = 30 * time.Second
-
-func getCachedObjectInfo(path string) (*workspace.ObjectInfo, bool) {
-	if val, ok := cache.Load(path); ok {
-		entry := val.(CacheEntry)
-		if time.Since(entry.Timestamp) < cacheTTL {
-			return entry.Info, true
-		}
-		cache.Delete(path)
+func NewCache(ttl time.Duration) *Cache {
+	return &Cache{
+		entries:  make(map[string]*CacheEntry),
+		cacheTTL: ttl,
 	}
-	return nil, false
 }
 
-func setCachedObjectInfo(path string, info *workspace.ObjectInfo) {
-	cache.Store(path, CacheEntry{Info: info, Timestamp: time.Now()})
+func (c *Cache) Get(path string) (fs.FileInfo, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry, found := c.entries[path]
+	if !found {
+		return nil, false
+	}
+
+	if time.Now().After(entry.expiration) {
+		delete(c.entries, path)
+		return nil, false
+	}
+
+	return entry.info, true
+}
+
+func (c *Cache) Set(path string, info fs.FileInfo) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	expiration := time.Now().Add(c.cacheTTL)
+	c.entries[path] = &CacheEntry{info: info, expiration: expiration}
+}
+
+func (c *Cache) Invalidate(filePath string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	delete(c.entries, filePath)
+	delete(c.entries, path.Dir(filePath))
 }

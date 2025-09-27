@@ -89,6 +89,7 @@ type objectInfoResponse struct {
 type WorkspaceFilesClient struct {
 	workspaceClient *databricks.WorkspaceClient
 	apiClient       *client.DatabricksClient
+	cache           *Cache
 }
 
 func NewWorkspaceFilesClient(w *databricks.WorkspaceClient) (*WorkspaceFilesClient, error) {
@@ -100,12 +101,16 @@ func NewWorkspaceFilesClient(w *databricks.WorkspaceClient) (*WorkspaceFilesClie
 	return &WorkspaceFilesClient{
 		workspaceClient: w,
 		apiClient:       databricksClient,
+		cache:           NewCache(60 * time.Second),
 	}, nil
 }
 
 func (c *WorkspaceFilesClient) Stat(ctx context.Context, filePath string) (fs.FileInfo, error) {
-	var resp objectInfoResponse
+	if info, found := c.cache.Get(filePath); found {
+		return info, nil
+	}
 
+	var resp objectInfoResponse
 	urlPath := fmt.Sprintf(
 		"/api/2.0/workspace-files/object-info?path=%s",
 		url.QueryEscape(filePath),
@@ -116,13 +121,11 @@ func (c *WorkspaceFilesClient) Stat(ctx context.Context, filePath string) (fs.Fi
 		return nil, err
 	}
 
-	info := WSFileInfo{
-		ObjectInfo: resp.WsfsObjectInfo.ObjectInfo,
-	}
+	info := WSFileInfo{ObjectInfo: resp.WsfsObjectInfo.ObjectInfo}
 	if resp.WsfsObjectInfo.SignedURL != nil {
 		info.SignedURL = resp.WsfsObjectInfo.SignedURL.URL
 	}
-
+	c.cache.Set(filePath, info)
 	return info, nil
 }
 
@@ -147,6 +150,7 @@ func (c *WorkspaceFilesClient) ReadDir(ctx context.Context, dirPath string) ([]f
 			info.SignedURL = obj.SignedURL.URL
 		}
 		entries[i] = WSDirEntry{info}
+		c.cache.Set(info.Path, info)
 	}
 
 	sort.Slice(entries, func(i, j int) bool {
@@ -168,6 +172,8 @@ func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]
 }
 
 func (c *WorkspaceFilesClient) Write(ctx context.Context, filePath string, data []byte) error {
+	c.cache.Invalidate(filePath)
+
 	urlPath := fmt.Sprintf(
 		"/api/2.0/workspace-files/import-file/%s?overwrite=true",
 		url.PathEscape(strings.TrimLeft(filePath, "/")),
@@ -177,6 +183,8 @@ func (c *WorkspaceFilesClient) Write(ctx context.Context, filePath string, data 
 }
 
 func (c *WorkspaceFilesClient) Delete(ctx context.Context, filePath string, recursive bool) error {
+	c.cache.Invalidate(filePath)
+
 	return c.workspaceClient.Workspace.Delete(ctx, workspace.Delete{
 		Path:      filePath,
 		Recursive: recursive,
@@ -184,6 +192,8 @@ func (c *WorkspaceFilesClient) Delete(ctx context.Context, filePath string, recu
 }
 
 func (c *WorkspaceFilesClient) Mkdir(ctx context.Context, dirPath string) error {
+	c.cache.Invalidate(dirPath)
+
 	return c.workspaceClient.Workspace.Mkdirs(ctx, workspace.Mkdirs{
 		Path: dirPath,
 	})
