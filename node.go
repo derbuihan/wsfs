@@ -44,6 +44,12 @@ func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 	out.Atime = out.Mtime
 	out.Ctime = out.Mtime
 
+	caller, ok := fuse.FromContext(ctx)
+	if ok {
+		out.Uid = caller.Uid
+		out.Gid = caller.Gid
+	}
+
 	out.SetTimeout(60)
 
 	return 0
@@ -104,6 +110,12 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	out.Mtime = uint64(modTime.Unix())
 	out.Atime = out.Mtime
 	out.Ctime = out.Mtime
+
+	caller, ok := fuse.FromContext(ctx)
+	if ok {
+		out.Uid = caller.Uid
+		out.Gid = caller.Gid
+	}
 
 	out.SetEntryTimeout(60)
 	out.SetAttrTimeout(60)
@@ -212,6 +224,13 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 	out.Mtime = uint64(modTime.Unix())
 	out.Atime = out.Mtime
 	out.Ctime = out.Mtime
+
+	caller, ok := fuse.FromContext(ctx)
+	if ok {
+		out.Uid = caller.Uid
+		out.Gid = caller.Gid
+	}
+
 	out.SetEntryTimeout(60)
 	out.SetAttrTimeout(60)
 
@@ -269,6 +288,13 @@ func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 	out.Mtime = uint64(modTime.Unix())
 	out.Atime = out.Mtime
 	out.Ctime = out.Mtime
+
+	caller, ok := fuse.FromContext(ctx)
+	if ok {
+		out.Uid = caller.Uid
+		out.Gid = caller.Gid
+	}
+
 	out.SetEntryTimeout(60)
 	out.SetAttrTimeout(60)
 
