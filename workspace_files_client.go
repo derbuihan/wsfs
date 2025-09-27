@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"path"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/databricks/databricks-sdk-go"
@@ -169,4 +170,60 @@ func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]
 		return nil, err
 	}
 	return base64.StdEncoding.DecodeString(resp.Content)
+}
+
+func (c *WorkspaceFilesClient) Write(ctx context.Context, filePath string, data []byte) error {
+	urlPath := fmt.Sprintf(
+		"/api/2.0/workspace-files/import-file/%s?overwrite=true",
+		url.PathEscape(strings.TrimLeft(filePath, "/")),
+	)
+
+	return c.apiClient.Do(ctx, http.MethodPost, urlPath, nil, nil, data, nil)
+}
+
+func (c *WorkspaceFilesClient) WriteReader(ctx context.Context, filePath string, reader io.Reader) error {
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return err
+	}
+	return c.Write(ctx, filePath, data)
+}
+
+func (c *WorkspaceFilesClient) Delete(ctx context.Context, filePath string, recursive bool) error {
+	return c.workspaceClient.Workspace.Delete(ctx, workspace.Delete{
+		Path:      filePath,
+		Recursive: recursive,
+	})
+}
+
+func (c *WorkspaceFilesClient) Mkdir(ctx context.Context, dirPath string) error {
+	return c.workspaceClient.Workspace.Mkdirs(ctx, workspace.Mkdirs{
+		Path: dirPath,
+	})
+}
+
+// Helpers
+
+func (c *WorkspaceFilesClient) Exists(ctx context.Context, path string) (bool, error) {
+	_, err := c.Stat(ctx, path)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (c *WorkspaceFilesClient) IsDir(ctx context.Context, path string) (bool, error) {
+	stat, err := c.Stat(ctx, path)
+	if err != nil {
+		return false, err
+	}
+	return stat.IsDir(), nil
+}
+
+func (c *WorkspaceFilesClient) IsFile(ctx context.Context, path string) (bool, error) {
+	stat, err := c.Stat(ctx, path)
+	if err != nil {
+		return false, err
+	}
+	return !stat.IsDir(), nil
 }

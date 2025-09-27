@@ -80,13 +80,6 @@ func (n *WSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	return fs.NewListDirStream(fuseEntries), 0
 }
 
-func getMode(objectType workspace.ObjectType) uint32 {
-	if objectType == workspace.ObjectTypeDirectory {
-		return syscall.S_IFDIR | 0755
-	}
-	return syscall.S_IFREG | 0644
-}
-
 func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	log.Printf("Lookup called on path: %s/%s", n.fileInfo.Path, name)
 	if !n.fileInfo.IsDir() {
