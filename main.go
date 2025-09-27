@@ -40,7 +40,7 @@ func main() {
 	// Set up Root node
 	root, err := NewRootNode(wfclient, "/")
 	if err != nil {
-		log.Fatal("Faild to create root node: %v", err)
+		log.Fatalf("Faild to create root node: %v", err)
 	}
 
 	// Mount filesystem

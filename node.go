@@ -23,6 +23,11 @@ var _ = (fs.NodeReaddirer)((*WSNode)(nil))
 var _ = (fs.NodeLookuper)((*WSNode)(nil))
 var _ = (fs.NodeOpener)((*WSNode)(nil))
 var _ = (fs.NodeReader)((*WSNode)(nil))
+var _ = (fs.NodeWriter)((*WSNode)(nil))
+var _ = (fs.NodeCreater)((*WSNode)(nil))
+var _ = (fs.NodeUnlinker)((*WSNode)(nil))
+var _ = (fs.NodeMkdirer)((*WSNode)(nil))
+var _ = (fs.NodeRmdirer)((*WSNode)(nil))
 
 func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	log.Printf("Getattr called on path: %s", n.fileInfo.Path)
@@ -42,18 +47,6 @@ func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 	out.SetTimeout(60)
 
 	return 0
-}
-
-func (entry WSDirEntry) ToFuseDirEntry() fuse.DirEntry {
-	mode := uint32(syscall.S_IFREG | 0644)
-	if entry.IsDir() {
-		mode = uint32(syscall.S_IFDIR | 0755)
-	}
-
-	return fuse.DirEntry{
-		Name: entry.Name(),
-		Mode: mode,
-	}
 }
 
 func (n *WSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
@@ -158,6 +151,152 @@ func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off in
 
 	result := n.data[off:end]
 	return fuse.ReadResultData(result), 0
+}
+
+func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
+	log.Printf("Write called on path: %s, offset: %d, size: %d", n.fileInfo.Path, off, len(data))
+
+	if n.data == nil {
+		log.Printf("Error: node data is nil on Write for %s", n.fileInfo.Path)
+		return 0, syscall.EIO
+	}
+
+	end := off + int64(len(data))
+	if int64(len(n.data)) < end {
+		newData := make([]byte, end)
+		copy(newData, n.data)
+		n.data = newData
+	}
+
+	copy(n.data[off:], data)
+
+	err := n.wfClient.Write(ctx, n.fileInfo.Path, n.data)
+	if err != nil {
+		log.Printf("Error writing back to databricks: %v", err)
+		return 0, syscall.EIO
+	}
+
+	n.fileInfo.ObjectInfo.Size = int64(len(n.data))
+
+	return uint32(len(data)), 0
+}
+
+func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
+	log.Printf("Create called in dir: %s, for file: %s", n.fileInfo.Path, name)
+
+	childPath := path.Join(n.fileInfo.Path, name)
+
+	err := n.wfClient.Write(ctx, childPath, []byte{})
+	if err != nil {
+		log.Printf("Error creating file on databricks: %v", err)
+		return nil, nil, 0, syscall.EIO
+	}
+
+	info, err := n.wfClient.Stat(ctx, childPath)
+	if err != nil {
+		log.Printf("Error stating new file: %v", err)
+		return nil, nil, 0, syscall.EIO
+	}
+
+	wsInfo := info.(WSFileInfo)
+
+	childNode := &WSNode{
+		wfClient: n.wfClient,
+		fileInfo: wsInfo,
+		data:     []byte{},
+	}
+
+	out.Mode = syscall.S_IFREG | 0644
+	out.Size = uint64(wsInfo.Size())
+	modTime := wsInfo.ModTime()
+	out.Mtime = uint64(modTime.Unix())
+	out.Atime = out.Mtime
+	out.Ctime = out.Mtime
+	out.SetEntryTimeout(60)
+	out.SetAttrTimeout(60)
+
+	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode)})
+
+	return child, nil, fuse.FOPEN_KEEP_CACHE, 0
+}
+
+func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
+	log.Printf("Unlink called in dir: %s, for file: %s", n.fileInfo.Path, name)
+
+	childPath := path.Join(n.fileInfo.Path, name)
+
+	info, err := n.wfClient.Stat(ctx, childPath)
+	if err != nil {
+		return syscall.ENOENT
+	}
+	if info.IsDir() {
+		return syscall.EISDIR
+	}
+
+	err = n.wfClient.Delete(ctx, childPath, false)
+	if err != nil {
+		log.Printf("Error deleting file on databricks: %v", err)
+		return syscall.EIO
+	}
+
+	return 0
+}
+
+func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	log.Printf("Mkdir called in dir: %s, for new dir: %s", n.fileInfo.Path, name)
+
+	childPath := path.Join(n.fileInfo.Path, name)
+	err := n.wfClient.Mkdir(ctx, childPath)
+	if err != nil {
+		log.Printf("Error creating directory on databricks: %v", err)
+		return nil, syscall.EIO
+	}
+
+	info, err := n.wfClient.Stat(ctx, childPath)
+	if err != nil {
+		log.Printf("Error stating new directory: %v", err)
+		return nil, syscall.EIO
+	}
+	wsInfo := info.(WSFileInfo)
+
+	childNode := &WSNode{
+		wfClient: n.wfClient,
+		fileInfo: wsInfo,
+	}
+
+	out.Mode = syscall.S_IFDIR | 0755
+	modTime := wsInfo.ModTime()
+	out.Mtime = uint64(modTime.Unix())
+	out.Atime = out.Mtime
+	out.Ctime = out.Mtime
+	out.SetEntryTimeout(60)
+	out.SetAttrTimeout(60)
+
+	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode)})
+
+	return child, 0
+}
+
+func (n *WSNode) Rmdir(ctx context.Context, name string) syscall.Errno {
+	log.Printf("Rmdir called in dir: %s, for dir: %s", n.fileInfo.Path, name)
+
+	childPath := path.Join(n.fileInfo.Path, name)
+
+	info, err := n.wfClient.Stat(ctx, childPath)
+	if err != nil {
+		return syscall.ENOENT
+	}
+	if !info.IsDir() {
+		return syscall.ENOTDIR
+	}
+
+	err = n.wfClient.Delete(ctx, childPath, false)
+	if err != nil {
+		log.Printf("Error deleting directory on databricks: %v", err)
+		return syscall.EIO
+	}
+
+	return 0
 }
 
 func NewRootNode(wfClient *WorkspaceFilesClient, rootPath string) (*WSNode, error) {

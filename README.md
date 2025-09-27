@@ -7,8 +7,10 @@ A FUSE-based file system to interact with Databricks workspace files and directo
 - [x] Mount Databricks workspace
 - [x] List files and directories
 - [x] Read files
-- [ ] Write files (in progress)
-
+- [x] Write files
+- [x] Make files and directories
+- [x] Delete files and directories
+- [ ] Cache files for faster access (in progress)
 
 ## Usage
 

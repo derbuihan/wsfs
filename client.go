@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"io"
 	"io/fs"
 	"net/http"
 	"net/url"
@@ -157,10 +156,6 @@ func (c *WorkspaceFilesClient) ReadDir(ctx context.Context, dirPath string) ([]f
 	return entries, nil
 }
 
-func (c *WorkspaceFilesClient) Read(ctx context.Context, filePath string) (io.ReadCloser, error) {
-	return c.workspaceClient.Workspace.Download(ctx, filePath)
-}
-
 func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]byte, error) {
 	resp, err := c.workspaceClient.Workspace.Export(ctx, workspace.ExportRequest{
 		Path:   filePath,
@@ -179,14 +174,6 @@ func (c *WorkspaceFilesClient) Write(ctx context.Context, filePath string, data 
 	)
 
 	return c.apiClient.Do(ctx, http.MethodPost, urlPath, nil, nil, data, nil)
-}
-
-func (c *WorkspaceFilesClient) WriteReader(ctx context.Context, filePath string, reader io.Reader) error {
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return err
-	}
-	return c.Write(ctx, filePath, data)
 }
 
 func (c *WorkspaceFilesClient) Delete(ctx context.Context, filePath string, recursive bool) error {
