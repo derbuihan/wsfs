@@ -4,13 +4,23 @@ A FUSE-based file system to interact with Databricks workspace files and directo
 
 ## Features
 
-- [x] Mount Databricks workspace
-- [x] List files and directories
-- [x] Read files
-- [x] Write files
-- [x] Make files and directories
-- [x] Delete files and directories
-- [ ] Cache files for faster access (in progress)
+vim still doesn't work on mount points
+
+- [x] Mount Databricks workspace.
+- [x] List files and directories.
+- [x] Read files.
+- [x] Write files.
+- [x] Make files and directories.
+- [x] Delete files and directories.
+- [ ] Support for filesystem operations (`Rename`, `Fsync` and `Setattr`).
+- [ ] Cache files for faster access. (in progress)
+
+## Distribution & Development Experience
+
+- [ ] Automate release builds using GitHub Actions.
+- [ ] Support installation via Homebrew (`brew install`).
+- [ ] Expand unit and integration tests to ensure stability.
+- [ ] Allow users to develop on Databricks directly from VSCode by running wsfs within a Remote Container.
 
 ## Usage
 
