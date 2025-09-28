@@ -27,6 +27,7 @@ var _ = (fs.NodeOpener)((*WSNode)(nil))
 var _ = (fs.NodeReader)((*WSNode)(nil))
 var _ = (fs.NodeWriter)((*WSNode)(nil))
 var _ = (fs.NodeFlusher)((*WSNode)(nil))
+var _ = (fs.NodeFsyncer)((*WSNode)(nil))
 var _ = (fs.NodeCreater)((*WSNode)(nil))
 var _ = (fs.NodeUnlinker)((*WSNode)(nil))
 var _ = (fs.NodeMkdirer)((*WSNode)(nil))
@@ -242,6 +243,25 @@ func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off i
 
 func (n *WSNode) Flush(ctx context.Context, fh fs.FileHandle) syscall.Errno {
 	log.Printf("Flash called on path: %s", n.fileInfo.Path)
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.data == nil {
+		return 0
+	}
+
+	err := n.wfClient.Write(ctx, n.fileInfo.Path, n.data)
+	if err != nil {
+		log.Printf("Error writting back on Flush: %v", err)
+		return syscall.EIO
+	}
+
+	return 0
+}
+
+func (n *WSNode) Fsync(ctx context.Context, fh fs.FileHandle, flags uint32) syscall.Errno {
+	log.Printf("Fsync called on path: %s", n.fileInfo.Path)
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
