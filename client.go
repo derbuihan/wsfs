@@ -108,6 +108,9 @@ func NewWorkspaceFilesClient(w *databricks.WorkspaceClient) (*WorkspaceFilesClie
 func (c *WorkspaceFilesClient) Stat(ctx context.Context, filePath string) (fs.FileInfo, error) {
 	info, found := c.cache.Get(filePath)
 	if found {
+		if info == nil {
+			return nil, fs.ErrNotExist
+		}
 		return info, nil
 	}
 
@@ -119,6 +122,7 @@ func (c *WorkspaceFilesClient) Stat(ctx context.Context, filePath string) (fs.Fi
 
 	err := c.apiClient.Do(ctx, http.MethodGet, urlPath, nil, nil, nil, &resp)
 	if err != nil {
+		c.cache.Set(filePath, nil)
 		return nil, err
 	}
 

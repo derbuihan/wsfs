@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"path"
+	"sync"
 	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -15,9 +16,11 @@ type WSNode struct {
 	wfClient *WorkspaceFilesClient
 	fileInfo WSFileInfo
 	data     []byte
+	mu       sync.Mutex
 }
 
 var _ = (fs.NodeGetattrer)((*WSNode)(nil))
+var _ = (fs.NodeSetattrer)((*WSNode)(nil))
 var _ = (fs.NodeReaddirer)((*WSNode)(nil))
 var _ = (fs.NodeLookuper)((*WSNode)(nil))
 var _ = (fs.NodeOpener)((*WSNode)(nil))
@@ -38,16 +41,15 @@ func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 	if wsInfo.IsDir() {
 		out.Mode = syscall.S_IFDIR | 0755
 		out.Nlink = 2
-		out.Size = 4096
 	} else {
 		out.Mode = syscall.S_IFREG | 0644
 		out.Nlink = 1
-		out.Size = uint64(wsInfo.Size())
 	}
 
 	// Block size
 	out.Blksize = 4096
 	out.Blocks = (out.Size + 511) / 512
+	out.Size = uint64(wsInfo.Size())
 
 	// Timestamp
 	modTime := wsInfo.ModTime()
@@ -63,6 +65,34 @@ func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 	}
 
 	out.SetTimeout(60)
+
+	return 0
+}
+
+func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	log.Printf("Setattr called on path: %s", n.fileInfo.Path)
+
+	if _, ok := in.GetMTime(); ok {
+		log.Printf("Setattr called on path %s to change mtime (operation ignored)", n.fileInfo.Path)
+	}
+
+	wsInfo := n.fileInfo
+	if wsInfo.IsDir() {
+		out.Mode = syscall.S_IFDIR | 0755
+	} else {
+		out.Mode = syscall.S_IFREG | 0644
+	}
+	out.Size = uint64(wsInfo.Size())
+	modTime := wsInfo.ModTime()
+	out.Mtime = uint64(modTime.Unix())
+	out.Atime = out.Mtime
+	out.Ctime = out.Mtime
+
+	caller, ok := fuse.FromContext(ctx)
+	if ok {
+		out.Uid = caller.Uid
+		out.Gid = caller.Gid
+	}
 
 	return 0
 }
@@ -144,6 +174,10 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 
 func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	log.Printf("Open called on path: %s", n.fileInfo.Path)
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
 	if n.fileInfo.IsDir() {
 		return nil, 0, syscall.EISDIR
 	}
@@ -161,6 +195,9 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 
 func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	log.Printf("Read called on path: %s, offset: %d, size: %d", n.fileInfo.Path, off, len(dest))
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
 
 	if n.data == nil {
 		log.Printf("Data is nil, file might not be opened properly")
@@ -183,6 +220,9 @@ func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off in
 func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
 	log.Printf("Write called on path: %s, offset: %d, size: %d", n.fileInfo.Path, off, len(data))
 
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
 	if n.data == nil {
 		log.Printf("Error: node data is nil on Write for %s", n.fileInfo.Path)
 		return 0, syscall.EIO
@@ -194,7 +234,6 @@ func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off i
 		copy(newData, n.data)
 		n.data = newData
 	}
-
 	copy(n.data[off:], data)
 
 	n.fileInfo.ObjectInfo.Size = int64(len(n.data))
@@ -204,6 +243,9 @@ func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off i
 
 func (n *WSNode) Flush(ctx context.Context, fh fs.FileHandle) syscall.Errno {
 	log.Printf("Flash called on path: %s", n.fileInfo.Path)
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
 
 	if n.data == nil {
 		return 0

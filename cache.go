@@ -2,7 +2,6 @@ package main
 
 import (
 	"io/fs"
-	"log"
 	"path"
 	"sync"
 	"time"
@@ -47,7 +46,6 @@ func (c *Cache) Get(path string) (fs.FileInfo, bool) {
 	}
 
 	if entry.info == negativeEntry {
-		log.Panicf("negative cache entry accessed:")
 		return nil, true
 	}
 
