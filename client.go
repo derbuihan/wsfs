@@ -200,6 +200,26 @@ func (c *WorkspaceFilesClient) Mkdir(ctx context.Context, dirPath string) error 
 	})
 }
 
+type renameRequest struct {
+	SourcePath      string `json:"source_path"`
+	DestinationPath string `json:"destination_path"`
+}
+
+func (c *WorkspaceFilesClient) Rename(ctx context.Context, source_path string, destination_path string) error {
+	urlPath := "/api/2.0/workspace/rename"
+	reqBody := renameRequest{SourcePath: source_path, DestinationPath: destination_path}
+
+	var data []byte
+	err := c.apiClient.Do(ctx, http.MethodPost, urlPath, nil, nil, reqBody, data, nil)
+	if err != nil {
+		return err
+	}
+
+	c.cache.Invalidate(source_path)
+	c.cache.Invalidate(destination_path)
+	return err
+}
+
 // Helpers
 
 func (c *WorkspaceFilesClient) Exists(ctx context.Context, path string) (bool, error) {

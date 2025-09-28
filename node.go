@@ -358,6 +358,25 @@ func (n *WSNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	return 0
 }
 
+func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+	log.Printf("Rename called from %s to %s", name, newName)
+
+	newParentNode, ok := newParent.EmbeddedInode().Operations().(*WSNode)
+	if !ok {
+		return syscall.EIO
+	}
+
+	oldPath := path.Join(n.fileInfo.Path, name)
+	newPath := path.Join(newParentNode.fileInfo.Path, newName)
+
+	err := n.wfClient.Rename(ctx, oldPath, newPath)
+
+	if err != nil {
+		return syscall.EIO
+	}
+	return 0
+}
+
 func NewRootNode(wfClient *WorkspaceFilesClient, rootPath string) (*WSNode, error) {
 	info, err := wfClient.Stat(context.Background(), rootPath)
 
