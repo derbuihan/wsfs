@@ -172,12 +172,12 @@ func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]
 	return base64.StdEncoding.DecodeString(resp.Content)
 }
 
-func (c *WorkspaceFilesClient) Write(ctx context.Context, filePath string, data []byte) error {
-	c.cache.Invalidate(filePath)
+func (c *WorkspaceFilesClient) Write(ctx context.Context, filepath string, data []byte) error {
+	c.cache.Invalidate(filepath)
 
 	urlPath := fmt.Sprintf(
 		"/api/2.0/workspace-files/import-file/%s?overwrite=true",
-		url.PathEscape(strings.TrimLeft(filePath, "/")),
+		url.PathEscape(strings.TrimLeft(filepath, "/")),
 	)
 
 	return c.apiClient.Do(ctx, http.MethodPost, urlPath, nil, nil, data, nil)
@@ -200,14 +200,13 @@ func (c *WorkspaceFilesClient) Mkdir(ctx context.Context, dirPath string) error 
 	})
 }
 
-type renameRequest struct {
-	SourcePath      string `json:"source_path"`
-	DestinationPath string `json:"destination_path"`
-}
-
 func (c *WorkspaceFilesClient) Rename(ctx context.Context, source_path string, destination_path string) error {
 	urlPath := "/api/2.0/workspace/rename"
-	reqBody := renameRequest{SourcePath: source_path, DestinationPath: destination_path}
+
+	reqBody := map[string]any{
+		"source_path":      source_path,
+		"destination_path": destination_path,
+	}
 
 	var data []byte
 	err := c.apiClient.Do(ctx, http.MethodPost, urlPath, nil, nil, reqBody, data, nil)

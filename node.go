@@ -28,6 +28,7 @@ var _ = (fs.NodeCreater)((*WSNode)(nil))
 var _ = (fs.NodeUnlinker)((*WSNode)(nil))
 var _ = (fs.NodeMkdirer)((*WSNode)(nil))
 var _ = (fs.NodeRmdirer)((*WSNode)(nil))
+var _ = (fs.NodeRenamer)((*WSNode)(nil))
 
 func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	log.Printf("Getattr called on path: %s", n.fileInfo.Path)
