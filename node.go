@@ -47,9 +47,9 @@ func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 	}
 
 	// Block size
+	out.Size = uint64(wsInfo.Size())
 	out.Blksize = 4096
 	out.Blocks = (out.Size + 511) / 512
-	out.Size = uint64(wsInfo.Size())
 
 	// Timestamp
 	modTime := wsInfo.ModTime()
@@ -140,14 +140,13 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	if wsInfo.IsDir() {
 		out.Mode = syscall.S_IFDIR | 0755
 		out.Nlink = 2
-		out.Size = 4096
 	} else {
 		out.Mode = syscall.S_IFREG | 0644
 		out.Nlink = 1
-		out.Size = uint64(wsInfo.Size())
 	}
 
 	// Block size
+	out.Size = uint64(wsInfo.Size())
 	out.Blksize = 4096
 	out.Blocks = (out.Size + 511) / 512
 
@@ -282,9 +281,9 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 	// Set the attributes for the file
 	out.Mode = syscall.S_IFREG | 0644
 	out.Nlink = 1
-	out.Size = uint64(wsInfo.Size())
 
 	// Block size
+	out.Size = uint64(wsInfo.Size())
 	out.Blksize = 4096
 	out.Blocks = (out.Size + 511) / 512
 
@@ -351,9 +350,9 @@ func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 	// Set the attributes for the file or directory
 	out.Mode = syscall.S_IFDIR | 0755
 	out.Nlink = 2
-	out.Size = 4096
 
 	// Block size
+	out.Size = uint64(wsInfo.Size())
 	out.Blksize = 4096
 	out.Blocks = (out.Size + 511) / 512
 
