@@ -38,10 +38,9 @@ func (n *WSNode) Path() string {
 	return n.fileInfo.Path
 }
 
-func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	log.Printf("Getattr called on path: %s", n.Path())
-
+func (n *WSNode) fillAttr(ctx context.Context, out *fuse.Attr) {
 	wsInfo := n.fileInfo
+
 	// Set the attributes for the file or directory
 	if wsInfo.IsDir() {
 		out.Mode = syscall.S_IFDIR | 0755
@@ -68,7 +67,12 @@ func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 		out.Uid = caller.Uid
 		out.Gid = caller.Gid
 	}
+}
 
+func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	log.Printf("Getattr called on path: %s", n.Path())
+
+	n.fillAttr(ctx, &out.Attr)
 	out.SetTimeout(60)
 
 	return 0
@@ -80,24 +84,7 @@ func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttr
 	if _, ok := in.GetMTime(); ok {
 		log.Printf("Setattr called on path %s to change mtime (operation ignored)", n.Path())
 	}
-
-	wsInfo := n.fileInfo
-	if wsInfo.IsDir() {
-		out.Mode = syscall.S_IFDIR | 0755
-	} else {
-		out.Mode = syscall.S_IFREG | 0644
-	}
-	out.Size = uint64(wsInfo.Size())
-	modTime := wsInfo.ModTime()
-	out.Mtime = uint64(modTime.Unix())
-	out.Atime = out.Mtime
-	out.Ctime = out.Mtime
-
-	caller, ok := fuse.FromContext(ctx)
-	if ok {
-		out.Uid = caller.Uid
-		out.Gid = caller.Gid
-	}
+	n.fillAttr(ctx, &out.Attr)
 
 	return 0
 }
@@ -141,37 +128,12 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 
 	wsInfo := info.(WSFileInfo)
 
-	// Set the attributes for the file or directory
-	if wsInfo.IsDir() {
-		out.Mode = syscall.S_IFDIR | 0755
-		out.Nlink = 2
-	} else {
-		out.Mode = syscall.S_IFREG | 0644
-		out.Nlink = 1
-	}
-
-	// Block size
-	out.Size = uint64(wsInfo.Size())
-	out.Blksize = 4096
-	out.Blocks = (out.Size + 511) / 512
-
-	// Timestamp
-	modTime := wsInfo.ModTime()
-	out.Mtime = uint64(modTime.Unix())
-	out.Atime = out.Mtime
-	out.Ctime = out.Mtime
-
-	// UID/GID
-	caller, ok := fuse.FromContext(ctx)
-	if ok {
-		out.Uid = caller.Uid
-		out.Gid = caller.Gid
-	}
+	childNode := &WSNode{wfClient: n.wfClient, fileInfo: wsInfo}
+	childNode.fillAttr(ctx, &out.Attr)
 
 	out.SetEntryTimeout(60)
 	out.SetAttrTimeout(60)
 
-	childNode := &WSNode{wfClient: n.wfClient, fileInfo: wsInfo}
 	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode)})
 	return child, 0
 }
@@ -301,33 +263,12 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 	}
 
 	wsInfo := info.(WSFileInfo)
-
-	// Set the attributes for the file
-	out.Mode = syscall.S_IFREG | 0644
-	out.Nlink = 1
-
-	// Block size
-	out.Size = uint64(wsInfo.Size())
-	out.Blksize = 4096
-	out.Blocks = (out.Size + 511) / 512
-
-	// Timestamp
-	modTime := wsInfo.ModTime()
-	out.Mtime = uint64(modTime.Unix())
-	out.Atime = out.Mtime
-	out.Ctime = out.Mtime
-
-	// UID/GID
-	caller, ok := fuse.FromContext(ctx)
-	if ok {
-		out.Uid = caller.Uid
-		out.Gid = caller.Gid
-	}
+	childNode := &WSNode{wfClient: n.wfClient, fileInfo: wsInfo, data: []byte{}}
+	childNode.fillAttr(ctx, &out.Attr)
 
 	out.SetEntryTimeout(60)
 	out.SetAttrTimeout(60)
 
-	childNode := &WSNode{wfClient: n.wfClient, fileInfo: wsInfo, data: []byte{}}
 	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode)})
 	return child, nil, fuse.FOPEN_KEEP_CACHE, 0
 }
@@ -341,6 +282,7 @@ func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	if err != nil {
 		return syscall.ENOENT
 	}
+
 	if info.IsDir() {
 		return syscall.EISDIR
 	}
@@ -369,36 +311,12 @@ func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 		log.Printf("Error stating new directory: %v", err)
 		return nil, syscall.EIO
 	}
+
 	wsInfo := info.(WSFileInfo)
-
-	// Set the attributes for the file or directory
-	out.Mode = syscall.S_IFDIR | 0755
-	out.Nlink = 2
-
-	// Block size
-	out.Size = uint64(wsInfo.Size())
-	out.Blksize = 4096
-	out.Blocks = (out.Size + 511) / 512
-
-	// Timestamp
-	modTime := wsInfo.ModTime()
-	out.Mtime = uint64(modTime.Unix())
-	out.Atime = out.Mtime
-	out.Ctime = out.Mtime
-
-	// UID/GID
-	caller, ok := fuse.FromContext(ctx)
-	if ok {
-		out.Uid = caller.Uid
-		out.Gid = caller.Gid
-	}
-
-	out.SetEntryTimeout(60)
-	out.SetAttrTimeout(60)
-
 	childNode := &WSNode{wfClient: n.wfClient, fileInfo: wsInfo}
-	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode)})
+	childNode.fillAttr(ctx, &out.Attr)
 
+	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode)})
 	return child, 0
 }
 
@@ -436,10 +354,19 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 	newPath := path.Join(newParentNode.fileInfo.Path, newName)
 
 	err := n.wfClient.Rename(ctx, oldPath, newPath)
-
 	if err != nil {
 		return syscall.EIO
 	}
+
+	childInode := n.GetChild(name)
+	if childInode != nil {
+		childNode, ok := childInode.Operations().(*WSNode)
+		if ok {
+			log.Printf("Updating internal path for in-memory node from '%s' to '%s'", childNode.fileInfo.Path, newPath)
+			childNode.fileInfo.Path = newPath
+		}
+	}
+
 	return 0
 }
 
