@@ -4,16 +4,18 @@ A FUSE-based file system to interact with Databricks workspace files and directo
 
 ## Features
 
-vim still doesn't work on mount points
-
 - [x] Mount Databricks workspace.
 - [x] List files and directories.
 - [x] Read files.
 - [x] Write files.
 - [x] Make files and directories.
 - [x] Delete files and directories.
-- [ ] Support for filesystem operations (`Rename`, `Fsync` and `Setattr`).
+- [x] Support for filesystem operations (`Rename`, `Fsync` and `Setattr`).
 - [ ] Cache files for faster access. (in progress)
+
+Notes:
+- `Setattr` currently supports size changes (truncate) and mtime updates. Permissions/ownership changes are ignored.
+- Vim saves are verified in the test suite.
 
 ## Distribution & Development Experience
 
@@ -53,7 +55,7 @@ Repos  Shared  Users
 
 ### Docker (recommended on macOS)
 
-This uses `docker-compose.yml` and runs the existing test script (`scripts/fuse_test.sh`) inside a privileged container with FUSE enabled.
+This uses `docker-compose.yml` and runs the test script (`scripts/fuse_test.sh`) inside a privileged container with FUSE enabled. The Docker image includes Vim so the save-path tests run in CI.
 
 ```bash
 $ docker compose run --rm --build wsfs-test
@@ -70,6 +72,7 @@ If you want to run tests directly on Linux without Docker:
 ```bash
 $ sudo apt-get update
 $ sudo apt-get install -y fuse3
+$ sudo apt-get install -y vim
 $ echo 'user_allow_other' | sudo tee -a /etc/fuse.conf
 $ mkdir -p /mnt/wsfs
 $ go build -o tmp/wsfs

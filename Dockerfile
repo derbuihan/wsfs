@@ -1,7 +1,7 @@
 FROM golang:1.22-bookworm
 
 RUN apt-get update \
-  && apt-get install -y fuse3 \
+  && apt-get install -y fuse3 vim \
   && rm -rf /var/lib/apt/lists/*
 
 RUN echo 'user_allow_other' >> /etc/fuse.conf
