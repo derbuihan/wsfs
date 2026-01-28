@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"hash/fnv"
 	"log"
 	"path"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -16,6 +18,7 @@ type WSNode struct {
 	wfClient *WorkspaceFilesClient
 	fileInfo WSFileInfo
 	data     []byte
+	dirty    bool
 	mu       sync.Mutex
 }
 
@@ -36,6 +39,86 @@ var _ = (fs.NodeRenamer)((*WSNode)(nil))
 
 func (n *WSNode) Path() string {
 	return n.fileInfo.Path
+}
+
+func stableIno(info WSFileInfo) uint64 {
+	if info.ObjectId > 0 {
+		return uint64(info.ObjectId)
+	}
+	if info.ResourceId != "" {
+		return hashStringToIno(info.ResourceId)
+	}
+	if info.Path != "" {
+		return hashStringToIno(info.Path)
+	}
+	return 1
+}
+
+func hashStringToIno(s string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(s))
+	sum := h.Sum64()
+	if sum == 0 {
+		return 1
+	}
+	return sum
+}
+
+func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
+	if n.data != nil {
+		return 0
+	}
+	if n.fileInfo.IsDir() {
+		return syscall.EISDIR
+	}
+	data, err := n.wfClient.ReadAll(ctx, n.Path())
+	if err != nil {
+		return syscall.EIO
+	}
+	n.data = data
+	return 0
+}
+
+func (n *WSNode) truncateLocked(size uint64) {
+	if n.data == nil {
+		n.data = []byte{}
+	}
+	cur := uint64(len(n.data))
+	if cur > size {
+		n.data = n.data[:size]
+	} else if cur < size {
+		newData := make([]byte, size)
+		copy(newData, n.data)
+		n.data = newData
+	}
+	n.fileInfo.ObjectInfo.Size = int64(size)
+	n.dirty = true
+}
+
+func (n *WSNode) markModifiedLocked(t time.Time) {
+	n.fileInfo.ObjectInfo.ModifiedAt = t.UnixMilli()
+}
+
+func (n *WSNode) flushLocked(ctx context.Context) syscall.Errno {
+	if !n.dirty || n.data == nil {
+		return 0
+	}
+
+	err := n.wfClient.Write(ctx, n.Path(), n.data)
+	if err != nil {
+		log.Printf("Error writting back on Flush: %v", err)
+		return syscall.EIO
+	}
+	n.dirty = false
+
+	info, err := n.wfClient.Stat(ctx, n.Path())
+	if err != nil {
+		log.Printf("Error refreshing file info after Flush: %v", err)
+		return 0
+	}
+	n.fileInfo = info.(WSFileInfo)
+
+	return 0
 }
 
 func (n *WSNode) fillAttr(ctx context.Context, out *fuse.Attr) {
@@ -81,9 +164,44 @@ func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	debugf("Setattr called on path: %s", n.Path())
 
-	if _, ok := in.GetMTime(); ok {
-		debugf("Setattr called on path %s to change mtime (operation ignored)", n.Path())
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	var mtime *time.Time
+	sizeChanged := false
+	if t, ok := in.GetMTime(); ok {
+		mtime = &t
 	}
+
+	if size, ok := in.GetSize(); ok {
+		if n.fileInfo.IsDir() {
+			return syscall.EISDIR
+		}
+		if size > 0 && n.data == nil {
+			if errno := n.ensureDataLocked(ctx); errno != 0 {
+				return errno
+			}
+		}
+		n.truncateLocked(size)
+		sizeChanged = true
+		if mtime == nil {
+			now := time.Now()
+			mtime = &now
+		}
+	}
+
+	if mtime != nil {
+		n.markModifiedLocked(*mtime)
+	}
+
+	if sizeChanged {
+		if errno := n.flushLocked(ctx); errno != 0 {
+			return errno
+		}
+	} else if mtime != nil {
+		n.wfClient.cache.Set(n.Path(), n.fileInfo)
+	}
+
 	n.fillAttr(ctx, &out.Attr)
 
 	return 0
@@ -134,7 +252,7 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	out.SetEntryTimeout(60)
 	out.SetAttrTimeout(60)
 
-	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode)})
+	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode), Ino: stableIno(wsInfo)})
 	return child, 0
 }
 
@@ -148,15 +266,25 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 		return nil, 0, syscall.EISDIR
 	}
 
-	if n.data == nil {
-		data, err := n.wfClient.ReadAll(ctx, n.Path())
-		if err != nil {
-			return nil, 0, syscall.EIO
+	if flags&syscall.O_TRUNC != 0 {
+		n.data = []byte{}
+		n.fileInfo.ObjectInfo.Size = 0
+		n.markModifiedLocked(time.Now())
+		n.dirty = true
+	} else if n.data == nil {
+		if errno := n.ensureDataLocked(ctx); errno != 0 {
+			return nil, 0, errno
 		}
-		n.data = data
 	}
 
-	return nil, fuse.FOPEN_KEEP_CACHE, 0
+	openFlags := uint32(0)
+	if flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_TRUNC) != 0 {
+		openFlags |= fuse.FOPEN_DIRECT_IO
+	} else {
+		openFlags |= fuse.FOPEN_KEEP_CACHE
+	}
+
+	return nil, openFlags, 0
 }
 
 func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
@@ -166,8 +294,9 @@ func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off in
 	defer n.mu.Unlock()
 
 	if n.data == nil {
-		debugf("Data is nil, file might not be opened properly")
-		return nil, syscall.EIO
+		if errno := n.ensureDataLocked(ctx); errno != 0 {
+			return nil, errno
+		}
 	}
 
 	end := off + int64(len(dest))
@@ -188,10 +317,13 @@ func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off i
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
-
+	if off < 0 {
+		return 0, syscall.EINVAL
+	}
 	if n.data == nil {
-		log.Printf("Error: node data is nil on Write for %s", n.Path())
-		return 0, syscall.EIO
+		if errno := n.ensureDataLocked(ctx); errno != 0 {
+			return 0, errno
+		}
 	}
 
 	end := off + int64(len(data))
@@ -203,6 +335,8 @@ func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off i
 	copy(n.data[off:], data)
 
 	n.fileInfo.ObjectInfo.Size = int64(len(n.data))
+	n.markModifiedLocked(time.Now())
+	n.dirty = true
 
 	return uint32(len(data)), 0
 }
@@ -213,23 +347,7 @@ func (n *WSNode) Flush(ctx context.Context, fh fs.FileHandle) syscall.Errno {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	if n.data == nil {
-		return 0
-	}
-
-	err := n.wfClient.Write(ctx, n.Path(), n.data)
-	if err != nil {
-		log.Printf("Error writting back on Flush: %v", err)
-		return syscall.EIO
-	}
-
-	info, err := n.wfClient.Stat(ctx, n.Path())
-	if err != nil {
-		log.Printf("Error refreshing file info after Flush: %v", err)
-	}
-	n.fileInfo = info.(WSFileInfo)
-
-	return 0
+	return n.flushLocked(ctx)
 }
 
 func (n *WSNode) Fsync(ctx context.Context, fh fs.FileHandle, flags uint32) syscall.Errno {
@@ -238,23 +356,7 @@ func (n *WSNode) Fsync(ctx context.Context, fh fs.FileHandle, flags uint32) sysc
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	if n.data == nil {
-		return 0
-	}
-
-	err := n.wfClient.Write(ctx, n.Path(), n.data)
-	if err != nil {
-		log.Printf("Error writting back on Flush: %v", err)
-		return syscall.EIO
-	}
-
-	info, err := n.wfClient.Stat(ctx, n.Path())
-	if err != nil {
-		log.Printf("Error refreshing file info after Flush: %v", err)
-	}
-	n.fileInfo = info.(WSFileInfo)
-
-	return 0
+	return n.flushLocked(ctx)
 }
 
 func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
@@ -281,7 +383,7 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 	out.SetEntryTimeout(60)
 	out.SetAttrTimeout(60)
 
-	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode)})
+	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode), Ino: stableIno(wsInfo)})
 	return child, nil, fuse.FOPEN_KEEP_CACHE, 0
 }
 
@@ -328,7 +430,7 @@ func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 	childNode := &WSNode{wfClient: n.wfClient, fileInfo: wsInfo}
 	childNode.fillAttr(ctx, &out.Attr)
 
-	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode)})
+	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode), Ino: stableIno(wsInfo)})
 	return child, 0
 }
 
