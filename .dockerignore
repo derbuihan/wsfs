@@ -1,0 +1,7 @@
+.env
+.git
+.gitignore
+.DS_Store
+*.log
+wsfs
+/tmp

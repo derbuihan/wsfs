@@ -19,6 +19,7 @@ func main() {
 	if len(flag.Args()) < 1 {
 		log.Fatalf("Usage: %s MOUNTPOINT", os.Args[0])
 	}
+	debugLogs = *debug
 
 	// Set up Databricks client
 	w, err := databricks.NewWorkspaceClient()

@@ -70,7 +70,7 @@ func (n *WSNode) fillAttr(ctx context.Context, out *fuse.Attr) {
 }
 
 func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	log.Printf("Getattr called on path: %s", n.Path())
+	debugf("Getattr called on path: %s", n.Path())
 
 	n.fillAttr(ctx, &out.Attr)
 	out.SetTimeout(60)
@@ -79,10 +79,10 @@ func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 }
 
 func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
-	log.Printf("Setattr called on path: %s", n.Path())
+	debugf("Setattr called on path: %s", n.Path())
 
 	if _, ok := in.GetMTime(); ok {
-		log.Printf("Setattr called on path %s to change mtime (operation ignored)", n.Path())
+		debugf("Setattr called on path %s to change mtime (operation ignored)", n.Path())
 	}
 	n.fillAttr(ctx, &out.Attr)
 
@@ -90,7 +90,7 @@ func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttr
 }
 
 func (n *WSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	log.Printf("Readdir called on path: %s", n.Path())
+	debugf("Readdir called on path: %s", n.Path())
 
 	if !n.fileInfo.IsDir() {
 		return nil, syscall.ENOTDIR
@@ -114,7 +114,7 @@ func (n *WSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 }
 
 func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	log.Printf("Lookup called on path: %s/%s", n.Path(), name)
+	debugf("Lookup called on path: %s/%s", n.Path(), name)
 	if !n.fileInfo.IsDir() {
 		return nil, syscall.ENOTDIR
 	}
@@ -139,7 +139,7 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 }
 
 func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	log.Printf("Open called on path: %s", n.Path())
+	debugf("Open called on path: %s", n.Path())
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -160,13 +160,13 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 }
 
 func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	log.Printf("Read called on path: %s, offset: %d, size: %d", n.Path(), off, len(dest))
+	debugf("Read called on path: %s, offset: %d, size: %d", n.Path(), off, len(dest))
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	if n.data == nil {
-		log.Printf("Data is nil, file might not be opened properly")
+		debugf("Data is nil, file might not be opened properly")
 		return nil, syscall.EIO
 	}
 
@@ -184,7 +184,7 @@ func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off in
 }
 
 func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
-	log.Printf("Write called on path: %s, offset: %d, size: %d", n.Path(), off, len(data))
+	debugf("Write called on path: %s, offset: %d, size: %d", n.Path(), off, len(data))
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -208,7 +208,7 @@ func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off i
 }
 
 func (n *WSNode) Flush(ctx context.Context, fh fs.FileHandle) syscall.Errno {
-	log.Printf("Flash called on path: %s", n.Path())
+	debugf("Flush called on path: %s", n.Path())
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -222,12 +222,18 @@ func (n *WSNode) Flush(ctx context.Context, fh fs.FileHandle) syscall.Errno {
 		log.Printf("Error writting back on Flush: %v", err)
 		return syscall.EIO
 	}
+
+	info, err := n.wfClient.Stat(ctx, n.Path())
+	if err != nil {
+		log.Printf("Error refreshing file info after Flush: %v", err)
+	}
+	n.fileInfo = info.(WSFileInfo)
 
 	return 0
 }
 
 func (n *WSNode) Fsync(ctx context.Context, fh fs.FileHandle, flags uint32) syscall.Errno {
-	log.Printf("Fsync called on path: %s", n.Path())
+	debugf("Fsync called on path: %s", n.Path())
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -242,11 +248,17 @@ func (n *WSNode) Fsync(ctx context.Context, fh fs.FileHandle, flags uint32) sysc
 		return syscall.EIO
 	}
 
+	info, err := n.wfClient.Stat(ctx, n.Path())
+	if err != nil {
+		log.Printf("Error refreshing file info after Flush: %v", err)
+	}
+	n.fileInfo = info.(WSFileInfo)
+
 	return 0
 }
 
 func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
-	log.Printf("Create called in dir: %s, for file: %s", n.Path(), name)
+	debugf("Create called in dir: %s, for file: %s", n.Path(), name)
 
 	childPath := path.Join(n.Path(), name)
 
@@ -274,7 +286,7 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 }
 
 func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
-	log.Printf("Unlink called in dir: %s, for file: %s", n.Path(), name)
+	debugf("Unlink called in dir: %s, for file: %s", n.Path(), name)
 
 	childPath := path.Join(n.Path(), name)
 
@@ -297,7 +309,7 @@ func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
 }
 
 func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	log.Printf("Mkdir called in dir: %s, for new dir: %s", n.Path(), name)
+	debugf("Mkdir called in dir: %s, for new dir: %s", n.Path(), name)
 
 	childPath := path.Join(n.Path(), name)
 	err := n.wfClient.Mkdir(ctx, childPath)
@@ -321,7 +333,7 @@ func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 }
 
 func (n *WSNode) Rmdir(ctx context.Context, name string) syscall.Errno {
-	log.Printf("Rmdir called in dir: %s, for dir: %s", n.Path(), name)
+	debugf("Rmdir called in dir: %s, for dir: %s", n.Path(), name)
 
 	childPath := path.Join(n.Path(), name)
 
@@ -343,7 +355,7 @@ func (n *WSNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 }
 
 func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
-	log.Printf("Rename called from %s to %s", name, newName)
+	debugf("Rename called from %s to %s", name, newName)
 
 	newParentNode, ok := newParent.EmbeddedInode().Operations().(*WSNode)
 	if !ok {
@@ -362,7 +374,7 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 	if childInode != nil {
 		childNode, ok := childInode.Operations().(*WSNode)
 		if ok {
-			log.Printf("Updating internal path for in-memory node from '%s' to '%s'", childNode.fileInfo.Path, newPath)
+			debugf("Updating internal path for in-memory node from '%s' to '%s'", childNode.fileInfo.Path, newPath)
 			childNode.fileInfo.Path = newPath
 		}
 	}
