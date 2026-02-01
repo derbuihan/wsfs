@@ -55,6 +55,10 @@ func (info WSFileInfo) IsDir() bool {
 	return info.ObjectType == workspace.ObjectTypeDirectory || info.ObjectType == workspace.ObjectTypeRepo
 }
 
+func (info WSFileInfo) IsNotebook() bool {
+	return info.ObjectType == workspace.ObjectTypeNotebook
+}
+
 func (info WSFileInfo) Sys() any {
 	return info.ObjectInfo
 }
@@ -71,6 +75,10 @@ func (entry WSDirEntry) Type() fs.FileMode {
 
 func (entry WSDirEntry) Info() (fs.FileInfo, error) {
 	return entry.WSFileInfo, nil
+}
+
+func (entry WSDirEntry) IsNotebook() bool {
+	return entry.WSFileInfo.IsNotebook()
 }
 
 // workspace-files
@@ -105,6 +113,7 @@ type workspaceClient interface {
 	Export(ctx context.Context, request workspace.ExportRequest) (*workspace.ExportResponse, error)
 	Delete(ctx context.Context, request workspace.Delete) error
 	Mkdirs(ctx context.Context, request workspace.Mkdirs) error
+	Import(ctx context.Context, request workspace.Import) error
 }
 
 type WorkspaceFilesClient struct {
@@ -134,6 +143,23 @@ func NewWorkspaceFilesClientWithDeps(workspaceClient workspaceClient, apiClient 
 }
 
 func (c *WorkspaceFilesClient) Stat(ctx context.Context, filePath string) (fs.FileInfo, error) {
+	// Handle .ipynb suffix - try to find a notebook without the extension
+	if strings.HasSuffix(filePath, ".ipynb") {
+		basePath := strings.TrimSuffix(filePath, ".ipynb")
+		info, err := c.statInternal(ctx, basePath)
+		if err == nil {
+			wsInfo := info.(WSFileInfo)
+			if wsInfo.IsNotebook() {
+				return info, nil
+			}
+		}
+		// Not a notebook, return not found
+		return nil, fs.ErrNotExist
+	}
+	return c.statInternal(ctx, filePath)
+}
+
+func (c *WorkspaceFilesClient) statInternal(ctx context.Context, filePath string) (fs.FileInfo, error) {
 	info, found := c.cache.Get(filePath)
 	if found {
 		if info == nil {
@@ -221,6 +247,9 @@ func (c *WorkspaceFilesClient) readViaSignedURL(ctx context.Context, url string,
 }
 
 func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]byte, error) {
+	// Strip .ipynb suffix to get the actual remote path
+	actualPath := strings.TrimSuffix(filePath, ".ipynb")
+
 	// 1. Get signed URL from object-info (may already be cached in Stat())
 	info, err := c.Stat(ctx, filePath)
 	if err != nil {
@@ -229,19 +258,32 @@ func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]
 
 	wsInfo := info.(WSFileInfo)
 
-	// 2. Try to use signed URL if available
+	// For notebooks, use Export with JUPYTER format
+	if wsInfo.IsNotebook() {
+		resp, err := c.workspaceClient.Export(ctx, workspace.ExportRequest{
+			Path:   actualPath,
+			Format: workspace.ExportFormatJupyter,
+		})
+		if err != nil {
+			return nil, err
+		}
+		logging.Debugf("Read notebook via Export (JUPYTER format) for path: %s", actualPath)
+		return base64.StdEncoding.DecodeString(resp.Content)
+	}
+
+	// 2. Try to use signed URL if available (for non-notebook files)
 	if wsInfo.SignedURL != "" {
 		data, err := c.readViaSignedURL(ctx, wsInfo.SignedURL, wsInfo.SignedURLHeaders)
 		if err == nil {
-			logging.Debugf("Read via signed URL succeeded for path: %s", filePath)
+			logging.Debugf("Read via signed URL succeeded for path: %s", actualPath)
 			return data, nil
 		}
-		logging.Debugf("Read via signed URL failed for path: %s, falling back to Export: %v", filePath, err)
+		logging.Debugf("Read via signed URL failed for path: %s, falling back to Export: %v", actualPath, err)
 	}
 
 	// 3. Fallback: workspace.Export
 	resp, err := c.workspaceClient.Export(ctx, workspace.ExportRequest{
-		Path:   filePath,
+		Path:   actualPath,
 		Format: workspace.ExportFormatSource,
 	})
 	if err != nil {
@@ -316,38 +358,69 @@ func (c *WorkspaceFilesClient) writeViaWriteFiles(ctx context.Context, filepath 
 }
 
 func (c *WorkspaceFilesClient) Write(ctx context.Context, filepath string, data []byte) error {
-	c.cache.Invalidate(filepath)
+	// Check if existing file is a notebook
+	info, err := c.Stat(ctx, filepath)
+	if err == nil {
+		wsInfo := info.(WSFileInfo)
+		if wsInfo.IsNotebook() {
+			logging.Debugf("Writing to notebook: %s", filepath)
+			return c.WriteNotebook(ctx, filepath, data)
+		}
+	}
+
+	// New file with .ipynb extension should be created as a notebook
+	if strings.HasSuffix(filepath, ".ipynb") {
+		logging.Debugf("Creating new notebook: %s", filepath)
+		return c.WriteNotebook(ctx, filepath, data)
+	}
+
+	// Regular file handling
+	actualPath := strings.TrimSuffix(filepath, ".ipynb")
+	c.cache.Invalidate(actualPath)
 
 	// 1. Try new-files (experimental)
-	err := c.writeViaNewFiles(ctx, filepath, data)
+	err = c.writeViaNewFiles(ctx, actualPath, data)
 	if err == nil {
-		logging.Debugf("Write via new-files succeeded for path: %s", filepath)
+		logging.Debugf("Write via new-files succeeded for path: %s", actualPath)
 		return nil
 	}
-	logging.Debugf("Write via new-files failed for path: %s, trying write-files: %v", filepath, err)
+	logging.Debugf("Write via new-files failed for path: %s, trying write-files: %v", actualPath, err)
 
 	// 2. Try write-files (experimental)
-	err = c.writeViaWriteFiles(ctx, filepath, data)
+	err = c.writeViaWriteFiles(ctx, actualPath, data)
 	if err == nil {
-		logging.Debugf("Write via write-files succeeded for path: %s", filepath)
+		logging.Debugf("Write via write-files succeeded for path: %s", actualPath)
 		return nil
 	}
-	logging.Debugf("Write via write-files failed for path: %s, falling back to import-file: %v", filepath, err)
+	logging.Debugf("Write via write-files failed for path: %s, falling back to import-file: %v", actualPath, err)
 
 	// 3. Fallback: import-file
 	urlPath := fmt.Sprintf(
 		"/api/2.0/workspace-files/import-file/%s?overwrite=true",
-		url.PathEscape(strings.TrimLeft(filepath, "/")),
+		url.PathEscape(strings.TrimLeft(actualPath, "/")),
 	)
 
 	return c.apiClient.Do(ctx, http.MethodPost, urlPath, nil, nil, data, nil)
 }
 
+func (c *WorkspaceFilesClient) WriteNotebook(ctx context.Context, filePath string, data []byte) error {
+	actualPath := strings.TrimSuffix(filePath, ".ipynb")
+	c.cache.Invalidate(actualPath)
+
+	return c.workspaceClient.Import(ctx, workspace.Import{
+		Path:      actualPath,
+		Content:   base64.StdEncoding.EncodeToString(data),
+		Format:    workspace.ImportFormatJupyter,
+		Overwrite: true,
+	})
+}
+
 func (c *WorkspaceFilesClient) Delete(ctx context.Context, filePath string, recursive bool) error {
-	c.cache.Invalidate(filePath)
+	actualPath := strings.TrimSuffix(filePath, ".ipynb")
+	c.cache.Invalidate(actualPath)
 
 	return c.workspaceClient.Delete(ctx, workspace.Delete{
-		Path:      filePath,
+		Path:      actualPath,
 		Recursive: recursive,
 	})
 }
@@ -361,11 +434,14 @@ func (c *WorkspaceFilesClient) Mkdir(ctx context.Context, dirPath string) error 
 }
 
 func (c *WorkspaceFilesClient) Rename(ctx context.Context, source_path string, destination_path string) error {
+	actualSource := strings.TrimSuffix(source_path, ".ipynb")
+	actualDest := strings.TrimSuffix(destination_path, ".ipynb")
+
 	urlPath := "/api/2.0/workspace/rename"
 
 	reqBody := map[string]any{
-		"source_path":      source_path,
-		"destination_path": destination_path,
+		"source_path":      actualSource,
+		"destination_path": actualDest,
 	}
 
 	err := c.apiClient.Do(ctx, http.MethodPost, urlPath, nil, nil, reqBody, nil)
@@ -373,8 +449,8 @@ func (c *WorkspaceFilesClient) Rename(ctx context.Context, source_path string, d
 		return err
 	}
 
-	c.cache.Invalidate(source_path)
-	c.cache.Invalidate(destination_path)
+	c.cache.Invalidate(actualSource)
+	c.cache.Invalidate(actualDest)
 	return nil
 }
 

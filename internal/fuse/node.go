@@ -5,6 +5,7 @@ import (
 	"hash/fnv"
 	"os"
 	"path"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -327,7 +328,12 @@ func (n *WSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		if e.IsDir() {
 			mode = uint32(syscall.S_IFDIR)
 		}
-		fuseEntries[i] = fuse.DirEntry{Name: e.Name(), Mode: mode}
+		name := e.Name()
+		// Add .ipynb extension for notebooks
+		if wsEntry, ok := e.(databricks.WSDirEntry); ok && wsEntry.IsNotebook() {
+			name = name + ".ipynb"
+		}
+		fuseEntries[i] = fuse.DirEntry{Name: name, Mode: mode}
 	}
 
 	return fs.NewListDirStream(fuseEntries), 0
@@ -507,7 +513,15 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 
 	childPath := path.Join(n.Path(), name)
 
-	err := n.wfClient.Write(ctx, childPath, []byte{})
+	// For .ipynb files, create an empty Jupyter notebook
+	var initialContent []byte
+	if strings.HasSuffix(name, ".ipynb") {
+		initialContent = []byte(`{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":4}`)
+	} else {
+		initialContent = []byte{}
+	}
+
+	err := n.wfClient.Write(ctx, childPath, initialContent)
 	if err != nil {
 		logging.Debugf("Error creating file on databricks: %v", err)
 		return nil, nil, 0, syscall.EIO
@@ -520,7 +534,7 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 	}
 
 	wsInfo := info.(databricks.WSFileInfo)
-	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo, buf: fileBuffer{Data: []byte{}}}
+	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo, buf: fileBuffer{Data: initialContent}}
 	childNode.fillAttr(ctx, &out.Attr)
 
 	out.SetEntryTimeout(60)
@@ -550,10 +564,11 @@ func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return syscall.EIO
 	}
 
-	// Remove from cache
+	// Remove from cache (use actual path without .ipynb suffix)
+	actualPath := strings.TrimSuffix(childPath, ".ipynb")
 	if n.diskCache != nil && !n.diskCache.IsDisabled() {
-		if err := n.diskCache.Delete(childPath); err != nil {
-			logging.Debugf("Failed to delete from cache %s: %v", childPath, err)
+		if err := n.diskCache.Delete(actualPath); err != nil {
+			logging.Debugf("Failed to delete from cache %s: %v", actualPath, err)
 		}
 	}
 
@@ -622,10 +637,12 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 		return syscall.EIO
 	}
 
-	// Delete old path from cache (new path will be cached on next access)
+	// Delete old path from cache (use actual path without .ipynb suffix)
+	actualOldPath := strings.TrimSuffix(oldPath, ".ipynb")
+	actualNewPath := strings.TrimSuffix(newPath, ".ipynb")
 	if n.diskCache != nil && !n.diskCache.IsDisabled() {
-		if err := n.diskCache.Delete(oldPath); err != nil {
-			logging.Debugf("Failed to delete old path from cache %s: %v", oldPath, err)
+		if err := n.diskCache.Delete(actualOldPath); err != nil {
+			logging.Debugf("Failed to delete old path from cache %s: %v", actualOldPath, err)
 		}
 	}
 
@@ -633,8 +650,8 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 	if childInode != nil {
 		childNode, ok := childInode.Operations().(*WSNode)
 		if ok {
-			logging.Debugf("Updating internal path for in-memory node from '%s' to '%s'", childNode.fileInfo.Path, newPath)
-			childNode.fileInfo.Path = newPath
+			logging.Debugf("Updating internal path for in-memory node from '%s' to '%s'", childNode.fileInfo.Path, actualNewPath)
+			childNode.fileInfo.Path = actualNewPath
 		}
 	}
 

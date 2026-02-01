@@ -79,11 +79,12 @@ func (f *FakeWorkspaceAPI) CacheSet(path string, info fs.FileInfo) {
 }
 
 // MockWorkspaceClient is a mock for the workspaceClient interface (thin wrapper)
-// This only implements the methods we actually use: Export, Delete, Mkdirs
+// This only implements the methods we actually use: Export, Delete, Mkdirs, Import
 type MockWorkspaceClient struct {
 	ExportFunc func(ctx context.Context, request workspace.ExportRequest) (*workspace.ExportResponse, error)
 	DeleteFunc func(ctx context.Context, request workspace.Delete) error
 	MkdirsFunc func(ctx context.Context, request workspace.Mkdirs) error
+	ImportFunc func(ctx context.Context, request workspace.Import) error
 }
 
 func (m *MockWorkspaceClient) Export(ctx context.Context, request workspace.ExportRequest) (*workspace.ExportResponse, error) {
@@ -103,6 +104,13 @@ func (m *MockWorkspaceClient) Delete(ctx context.Context, request workspace.Dele
 func (m *MockWorkspaceClient) Mkdirs(ctx context.Context, request workspace.Mkdirs) error {
 	if m.MkdirsFunc != nil {
 		return m.MkdirsFunc(ctx, request)
+	}
+	return fmt.Errorf("not implemented")
+}
+
+func (m *MockWorkspaceClient) Import(ctx context.Context, request workspace.Import) error {
+	if m.ImportFunc != nil {
+		return m.ImportFunc(ctx, request)
 	}
 	return fmt.Errorf("not implemented")
 }
