@@ -21,6 +21,7 @@ import (
 
 func main() {
 	debug := flag.Bool("debug", false, "print debug data")
+	allowOther := flag.Bool("allow-other", false, "allow other users to access the mount")
 
 	// Cache configuration
 	enableCache := flag.Bool("cache", true, "enable disk cache for file contents")
@@ -62,13 +63,13 @@ func main() {
 	// Set up Databricks FS client
 	wfclient, err := databricks.NewWorkspaceFilesClient(w)
 	if err != nil {
-		log.Fatalf("Faild to create Databricks Workspace Files Client: %v", err)
+		log.Fatalf("Failed to create Databricks Workspace Files Client: %v", err)
 	}
 
 	// Set up Root node
 	root, err := wsfsfuse.NewRootNode(wfclient, diskCache, "/")
 	if err != nil {
-		log.Fatalf("Faild to create root node: %v", err)
+		log.Fatalf("Failed to create root node: %v", err)
 	}
 
 	// Mount filesystem
@@ -81,7 +82,7 @@ func main() {
 		EntryTimeout:    &entryTimeout,
 		NegativeTimeout: &negativeTimeout,
 		MountOptions: fuse.MountOptions{
-			AllowOther: true,
+			AllowOther: *allowOther,
 			Name:       "wsfs",
 			FsName:     "wsfs",
 		},

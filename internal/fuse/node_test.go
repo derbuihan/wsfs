@@ -891,3 +891,90 @@ func TestReaddirAddsIpynbExtension(t *testing.T) {
 // Note: TestCreateNotebook is not included here because Create() requires
 // a fully initialized FUSE bridge (NewPersistentInode). The notebook creation
 // logic is tested via client_test.go::TestWriteNotebook instead.
+
+func TestValidateChildPath(t *testing.T) {
+	tests := []struct {
+		name       string
+		parentPath string
+		childName  string
+		wantPath   string
+		wantErr    bool
+	}{
+		{
+			name:       "valid simple name",
+			parentPath: "/Users/test",
+			childName:  "file.txt",
+			wantPath:   "/Users/test/file.txt",
+			wantErr:    false,
+		},
+		{
+			name:       "valid name with dots",
+			parentPath: "/Users/test",
+			childName:  "file.tar.gz",
+			wantPath:   "/Users/test/file.tar.gz",
+			wantErr:    false,
+		},
+		{
+			name:       "reject dot",
+			parentPath: "/Users/test",
+			childName:  ".",
+			wantPath:   "",
+			wantErr:    true,
+		},
+		{
+			name:       "reject dotdot",
+			parentPath: "/Users/test",
+			childName:  "..",
+			wantPath:   "",
+			wantErr:    true,
+		},
+		{
+			name:       "reject path with slash",
+			parentPath: "/Users/test",
+			childName:  "subdir/file.txt",
+			wantPath:   "",
+			wantErr:    true,
+		},
+		{
+			name:       "reject path traversal attempt",
+			parentPath: "/Users/test",
+			childName:  "../../../etc/passwd",
+			wantPath:   "",
+			wantErr:    true,
+		},
+		{
+			name:       "reject backslash",
+			parentPath: "/Users/test",
+			childName:  "sub\\file.txt",
+			wantPath:   "",
+			wantErr:    true,
+		},
+		{
+			name:       "valid hidden file",
+			parentPath: "/Users/test",
+			childName:  ".hidden",
+			wantPath:   "/Users/test/.hidden",
+			wantErr:    false,
+		},
+		{
+			name:       "root parent",
+			parentPath: "/",
+			childName:  "file.txt",
+			wantPath:   "/file.txt",
+			wantErr:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotPath, err := validateChildPath(tt.parentPath, tt.childName)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateChildPath() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if gotPath != tt.wantPath {
+				t.Errorf("validateChildPath() = %q, want %q", gotPath, tt.wantPath)
+			}
+		})
+	}
+}

@@ -217,6 +217,63 @@ if [ "$FUSE_ONLY" = false ]; then
 
     echo ""
     echo "========================================"
+    echo "Testing Cache Permissions (0700/0600)"
+    echo "========================================"
+
+    $DOCKER_RUN wsfs-test bash -c '
+      set -e
+      go build -o /tmp/wsfs ./cmd/wsfs
+
+      CACHE_DIR="/tmp/wsfs-cache-perm-test"
+      mkdir -p /mnt/wsfs
+      rm -rf "$CACHE_DIR"
+
+      /tmp/wsfs --debug --cache=true --cache-dir="$CACHE_DIR" /mnt/wsfs &
+      WSFS_PID=$!
+
+      for i in $(seq 1 30); do
+        if grep -q " /mnt/wsfs " /proc/mounts 2>/dev/null; then break; fi
+        sleep 1
+      done
+
+      # Create a file to trigger cache
+      TEST_DIR="/mnt/wsfs/perm_test_$$"
+      mkdir -p "$TEST_DIR"
+      echo "permission test content" > "$TEST_DIR/perm_test.txt"
+      cat "$TEST_DIR/perm_test.txt" > /dev/null
+
+      # Check cache directory permissions
+      DIR_PERM=$(stat -c "%a" "$CACHE_DIR")
+      if [ "$DIR_PERM" = "700" ]; then
+        echo "✓ PASS: Cache directory has correct permissions (0700)"
+      else
+        echo "✗ FAIL: Cache directory has wrong permissions: $DIR_PERM (expected 700)"
+        exit 1
+      fi
+
+      # Check cache file permissions
+      CACHE_FILES=$(find "$CACHE_DIR" -type f 2>/dev/null)
+      if [ -n "$CACHE_FILES" ]; then
+        for f in $CACHE_FILES; do
+          FILE_PERM=$(stat -c "%a" "$f")
+          if [ "$FILE_PERM" = "600" ]; then
+            echo "✓ PASS: Cache file has correct permissions (0600)"
+          else
+            echo "✗ FAIL: Cache file has wrong permissions: $FILE_PERM (expected 600)"
+            exit 1
+          fi
+        done
+      else
+        echo "Note: No cache files found (may have been read from memory)"
+      fi
+
+      rm -rf "$TEST_DIR"
+      fusermount3 -u /mnt/wsfs || fusermount -u /mnt/wsfs || umount /mnt/wsfs || true
+      kill $WSFS_PID 2>/dev/null || true
+    '
+
+    echo ""
+    echo "========================================"
     echo "Testing Short TTL (5s)"
     echo "========================================"
 

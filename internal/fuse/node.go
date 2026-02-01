@@ -2,6 +2,7 @@ package fuse
 
 import (
 	"context"
+	"fmt"
 	"hash/fnv"
 	"os"
 	"path"
@@ -79,6 +80,37 @@ func hashStringToIno(s string) uint64 {
 		return 1
 	}
 	return sum
+}
+
+// validateChildPath validates and constructs a child path, preventing path traversal attacks.
+// Returns the validated child path or an error if the name contains path traversal sequences.
+func validateChildPath(parentPath, childName string) (string, error) {
+	// Reject names containing path separators or traversal sequences
+	if strings.Contains(childName, "/") || strings.Contains(childName, "\\") {
+		return "", fmt.Errorf("invalid child name: contains path separator")
+	}
+	if childName == "." || childName == ".." {
+		return "", fmt.Errorf("invalid child name: %s", childName)
+	}
+
+	// Construct and clean the path
+	childPath := path.Join(parentPath, childName)
+	cleanPath := path.Clean(childPath)
+
+	// Verify the result is actually a child of the parent
+	cleanParent := path.Clean(parentPath)
+	// Handle root path specially
+	if cleanParent == "/" {
+		if !strings.HasPrefix(cleanPath, "/") || cleanPath == "/" {
+			return "", fmt.Errorf("path traversal detected")
+		}
+	} else {
+		if !strings.HasPrefix(cleanPath, cleanParent+"/") {
+			return "", fmt.Errorf("path traversal detected")
+		}
+	}
+
+	return cleanPath, nil
 }
 
 func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
@@ -345,7 +377,11 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 		return nil, syscall.ENOTDIR
 	}
 
-	childPath := path.Join(n.Path(), name)
+	childPath, err := validateChildPath(n.Path(), name)
+	if err != nil {
+		logging.Debugf("Lookup: invalid path: %v", err)
+		return nil, syscall.ENOENT
+	}
 
 	info, err := n.wfClient.Stat(ctx, childPath)
 	if err != nil {
@@ -530,7 +566,11 @@ func (n *WSNode) Release(ctx context.Context, fh fs.FileHandle) syscall.Errno {
 func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
 	logging.Debugf("Create called in dir: %s, for file: %s", n.Path(), name)
 
-	childPath := path.Join(n.Path(), name)
+	childPath, err := validateChildPath(n.Path(), name)
+	if err != nil {
+		logging.Debugf("Create: invalid path: %v", err)
+		return nil, nil, 0, syscall.EINVAL
+	}
 
 	// For .ipynb files, create an empty Jupyter notebook
 	var initialContent []byte
@@ -540,7 +580,7 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 		initialContent = []byte{}
 	}
 
-	err := n.wfClient.Write(ctx, childPath, initialContent)
+	err = n.wfClient.Write(ctx, childPath, initialContent)
 	if err != nil {
 		logging.Debugf("Error creating file on databricks: %v", err)
 		return nil, nil, 0, syscall.EIO
@@ -566,7 +606,11 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	logging.Debugf("Unlink called in dir: %s, for file: %s", n.Path(), name)
 
-	childPath := path.Join(n.Path(), name)
+	childPath, err := validateChildPath(n.Path(), name)
+	if err != nil {
+		logging.Debugf("Unlink: invalid path: %v", err)
+		return syscall.EINVAL
+	}
 
 	info, err := n.wfClient.Stat(ctx, childPath)
 	if err != nil {
@@ -597,8 +641,13 @@ func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
 func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	logging.Debugf("Mkdir called in dir: %s, for new dir: %s", n.Path(), name)
 
-	childPath := path.Join(n.Path(), name)
-	err := n.wfClient.Mkdir(ctx, childPath)
+	childPath, err := validateChildPath(n.Path(), name)
+	if err != nil {
+		logging.Debugf("Mkdir: invalid path: %v", err)
+		return nil, syscall.EINVAL
+	}
+
+	err = n.wfClient.Mkdir(ctx, childPath)
 	if err != nil {
 		logging.Debugf("Error creating directory on databricks: %v", err)
 		return nil, syscall.EIO
@@ -621,7 +670,11 @@ func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 func (n *WSNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	logging.Debugf("Rmdir called in dir: %s, for dir: %s", n.Path(), name)
 
-	childPath := path.Join(n.Path(), name)
+	childPath, err := validateChildPath(n.Path(), name)
+	if err != nil {
+		logging.Debugf("Rmdir: invalid path: %v", err)
+		return syscall.EINVAL
+	}
 
 	info, err := n.wfClient.Stat(ctx, childPath)
 	if err != nil {
@@ -648,10 +701,19 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 		return syscall.EIO
 	}
 
-	oldPath := path.Join(n.Path(), name)
-	newPath := path.Join(newParentNode.fileInfo.Path, newName)
+	oldPath, err := validateChildPath(n.Path(), name)
+	if err != nil {
+		logging.Debugf("Rename: invalid old path: %v", err)
+		return syscall.EINVAL
+	}
 
-	err := n.wfClient.Rename(ctx, oldPath, newPath)
+	newPath, err := validateChildPath(newParentNode.fileInfo.Path, newName)
+	if err != nil {
+		logging.Debugf("Rename: invalid new path: %v", err)
+		return syscall.EINVAL
+	}
+
+	err = n.wfClient.Rename(ctx, oldPath, newPath)
 	if err != nil {
 		return syscall.EIO
 	}

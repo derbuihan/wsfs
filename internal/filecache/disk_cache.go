@@ -44,7 +44,8 @@ func NewDiskCache(cacheDir string, maxSizeBytes int64, ttl time.Duration) (*Disk
 	}
 
 	// Create cache directory if it doesn't exist
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+	// Use 0700 to prevent other users from reading cached files
+	if err := os.MkdirAll(cacheDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create cache directory: %w", err)
 	}
 
@@ -138,8 +139,8 @@ func (c *DiskCache) Set(remotePath string, data []byte, remoteModTime time.Time)
 	// Generate local path
 	localPath := c.generateLocalPath(remotePath)
 
-	// Write data to disk
-	if err := os.WriteFile(localPath, data, 0644); err != nil {
+	// Write data to disk with restricted permissions (owner only)
+	if err := os.WriteFile(localPath, data, 0600); err != nil {
 		return "", fmt.Errorf("failed to write cache file: %w", err)
 	}
 
@@ -368,7 +369,7 @@ func (c *DiskCache) CopyToCache(remotePath string, srcPath string, remoteModTime
 	}
 	defer src.Close()
 
-	dst, err := os.Create(localPath)
+	dst, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return "", fmt.Errorf("failed to create cache file: %w", err)
 	}
