@@ -374,6 +374,25 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 		return nil, 0, syscall.EISDIR
 	}
 
+	// Check for remote modifications before using cached data
+	if n.buf.Data != nil && !n.buf.Dirty {
+		info, err := n.wfClient.Stat(ctx, n.Path())
+		if err == nil {
+			wsInfo := info.(databricks.WSFileInfo)
+			if wsInfo.ModTime().After(n.fileInfo.ModTime()) {
+				// Remote file was modified, invalidate cache
+				logging.Debugf("Remote file modified, invalidating cache for %s", n.Path())
+				n.buf.Data = nil
+				n.fileInfo = wsInfo
+				// Also invalidate disk cache
+				if n.diskCache != nil && !n.diskCache.IsDisabled() {
+					actualPath := strings.TrimSuffix(n.Path(), ".ipynb")
+					n.diskCache.Delete(actualPath)
+				}
+			}
+		}
+	}
+
 	if flags&syscall.O_TRUNC != 0 {
 		n.buf.Data = []byte{}
 		n.fileInfo.ObjectInfo.Size = 0

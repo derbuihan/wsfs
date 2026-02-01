@@ -661,3 +661,233 @@ func TestWSNodeOnForgetDirty(t *testing.T) {
 		t.Error("Expected dirty buffer to be preserved on forget")
 	}
 }
+
+// ============================================================================
+// Remote Modification Detection Tests
+// ============================================================================
+
+// TestOpenDetectsRemoteModification verifies that Open() invalidates cache when remote file is modified
+func TestOpenDetectsRemoteModification(t *testing.T) {
+	originalTime := time.Now().Add(-1 * time.Hour)
+	newTime := time.Now()
+	originalData := []byte("original content")
+	newData := []byte("modified content")
+	readAllCallCount := 0
+
+	api := &databricks.FakeWorkspaceAPI{
+		StatFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			// Return newer modification time
+			return databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+				ObjectType: workspace.ObjectTypeFile,
+				Path:       "/test.txt",
+				Size:       int64(len(newData)),
+				ModifiedAt: newTime.UnixMilli(),
+			}}, nil
+		},
+		ReadAllFunc: func(ctx context.Context, filePath string) ([]byte, error) {
+			readAllCallCount++
+			return newData, nil
+		},
+	}
+
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+			Size:       int64(len(originalData)),
+			ModifiedAt: originalTime.UnixMilli(),
+		}},
+		buf: fileBuffer{Data: originalData, Dirty: false},
+	}
+
+	// Open should detect remote modification and invalidate cache
+	_, _, errno := n.Open(context.Background(), 0)
+	if errno != 0 {
+		t.Fatalf("Open failed with errno: %d", errno)
+	}
+
+	// After Open, the buffer should have new data (fetched via ReadAll)
+	if string(n.buf.Data) != string(newData) {
+		t.Errorf("Expected buffer to have new data %q, got %q", string(newData), string(n.buf.Data))
+	}
+
+	// ReadAll should have been called once to fetch new data after cache invalidation
+	if readAllCallCount != 1 {
+		t.Errorf("Expected ReadAll to be called once after cache invalidation, got %d", readAllCallCount)
+	}
+}
+
+// TestOpenPreservesDirtyBuffer verifies that Open() does not invalidate dirty buffer
+func TestOpenPreservesDirtyBuffer(t *testing.T) {
+	originalTime := time.Now().Add(-1 * time.Hour)
+	newTime := time.Now()
+	localData := []byte("local modifications")
+
+	statCalled := false
+	api := &databricks.FakeWorkspaceAPI{
+		StatFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			statCalled = true
+			// Return newer modification time
+			return databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+				ObjectType: workspace.ObjectTypeFile,
+				Path:       "/test.txt",
+				Size:       100,
+				ModifiedAt: newTime.UnixMilli(),
+			}}, nil
+		},
+	}
+
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+			Size:       int64(len(localData)),
+			ModifiedAt: originalTime.UnixMilli(),
+		}},
+		buf: fileBuffer{Data: localData, Dirty: true}, // Buffer is dirty
+	}
+
+	_, _, errno := n.Open(context.Background(), 0)
+	if errno != 0 {
+		t.Fatalf("Open failed with errno: %d", errno)
+	}
+
+	// Dirty buffer should be preserved
+	if string(n.buf.Data) != string(localData) {
+		t.Error("Expected dirty buffer to be preserved")
+	}
+
+	// Stat should not be called for dirty buffer
+	if statCalled {
+		t.Error("Expected Stat not to be called for dirty buffer")
+	}
+}
+
+// TestOpenNoChangeWhenRemoteNotModified verifies Open() keeps cache when remote is unchanged
+func TestOpenNoChangeWhenRemoteNotModified(t *testing.T) {
+	sameTime := time.Now()
+	originalData := []byte("original content")
+	readAllCalled := false
+
+	api := &databricks.FakeWorkspaceAPI{
+		StatFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			return databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+				ObjectType: workspace.ObjectTypeFile,
+				Path:       "/test.txt",
+				Size:       int64(len(originalData)),
+				ModifiedAt: sameTime.UnixMilli(),
+			}}, nil
+		},
+		ReadAllFunc: func(ctx context.Context, filePath string) ([]byte, error) {
+			readAllCalled = true
+			return []byte("should not be called"), nil
+		},
+	}
+
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+			Size:       int64(len(originalData)),
+			ModifiedAt: sameTime.UnixMilli(),
+		}},
+		buf: fileBuffer{Data: originalData, Dirty: false},
+	}
+
+	_, _, errno := n.Open(context.Background(), 0)
+	if errno != 0 {
+		t.Fatalf("Open failed with errno: %d", errno)
+	}
+
+	// Buffer should still have original data
+	if string(n.buf.Data) != string(originalData) {
+		t.Error("Expected buffer to keep original data")
+	}
+
+	// ReadAll should not be called since remote is unchanged
+	if readAllCalled {
+		t.Error("Expected ReadAll not to be called when remote is unchanged")
+	}
+}
+
+// ============================================================================
+// Notebook (.ipynb) Extension Tests
+// ============================================================================
+
+// TestReaddirAddsIpynbExtension verifies that Readdir adds .ipynb extension to notebooks
+func TestReaddirAddsIpynbExtension(t *testing.T) {
+	api := &databricks.FakeWorkspaceAPI{
+		ReadDirFunc: func(ctx context.Context, dirPath string) ([]fs.DirEntry, error) {
+			return []fs.DirEntry{
+				databricks.WSDirEntry{WSFileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+					Path:       "/test/notebook1",
+					ObjectType: workspace.ObjectTypeNotebook,
+				}}},
+				databricks.WSDirEntry{WSFileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+					Path:       "/test/file.txt",
+					ObjectType: workspace.ObjectTypeFile,
+				}}},
+				databricks.WSDirEntry{WSFileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+					Path:       "/test/subdir",
+					ObjectType: workspace.ObjectTypeDirectory,
+				}}},
+			}, nil
+		},
+	}
+
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeDirectory,
+			Path:       "/test",
+		}},
+	}
+
+	dirStream, errno := n.Readdir(context.Background())
+	if errno != 0 {
+		t.Fatalf("Readdir failed with errno: %d", errno)
+	}
+
+	entries := []fuse.DirEntry{}
+	for dirStream.HasNext() {
+		entry, _ := dirStream.Next()
+		entries = append(entries, entry)
+	}
+
+	if len(entries) != 3 {
+		t.Fatalf("Expected 3 entries, got %d", len(entries))
+	}
+
+	// Check notebook has .ipynb extension
+	found := false
+	for _, e := range entries {
+		if e.Name == "notebook1.ipynb" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected notebook to have .ipynb extension")
+	}
+
+	// Check regular file doesn't have .ipynb extension
+	for _, e := range entries {
+		if e.Name == "file.txt.ipynb" {
+			t.Error("Regular file should not have .ipynb extension")
+		}
+	}
+
+	// Check directory doesn't have .ipynb extension
+	for _, e := range entries {
+		if e.Name == "subdir.ipynb" {
+			t.Error("Directory should not have .ipynb extension")
+		}
+	}
+}
+
+// Note: TestCreateNotebook is not included here because Create() requires
+// a fully initialized FUSE bridge (NewPersistentInode). The notebook creation
+// logic is tested via client_test.go::TestWriteNotebook instead.

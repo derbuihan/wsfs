@@ -860,3 +860,255 @@ func BenchmarkJSONEncoding(b *testing.B) {
 		}
 	}
 }
+
+// ============================================================================
+// Notebook (.ipynb) Tests
+// ============================================================================
+
+// TestIsNotebook verifies IsNotebook returns correct values for different ObjectTypes
+func TestIsNotebook(t *testing.T) {
+	tests := []struct {
+		name       string
+		objectType workspace.ObjectType
+		expected   bool
+	}{
+		{"notebook", workspace.ObjectTypeNotebook, true},
+		{"file", workspace.ObjectTypeFile, false},
+		{"directory", workspace.ObjectTypeDirectory, false},
+		{"repo", workspace.ObjectTypeRepo, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := WSFileInfo{ObjectInfo: workspace.ObjectInfo{ObjectType: tt.objectType}}
+			if got := info.IsNotebook(); got != tt.expected {
+				t.Errorf("IsNotebook() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestStatWithIpynbSuffix verifies that Stat handles .ipynb suffix correctly
+func TestStatWithIpynbSuffix(t *testing.T) {
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info") {
+				// Return notebook info for the base path (without .ipynb)
+				if strings.Contains(path, "notebook") && !strings.Contains(path, ".ipynb") {
+					resp := response.(*objectInfoResponse)
+					resp.WsfsObjectInfo = wsfsObjectInfo{
+						ObjectInfo: workspace.ObjectInfo{
+							Path:       "/test/notebook",
+							ObjectType: workspace.ObjectTypeNotebook,
+							Size:       100,
+							ModifiedAt: time.Now().UnixMilli(),
+						},
+					}
+					return nil
+				}
+			}
+			return fs.ErrNotExist
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, nil)
+
+	// Test 1: Stat with .ipynb suffix should find the notebook
+	info, err := client.Stat(context.Background(), "/test/notebook.ipynb")
+	if err != nil {
+		t.Fatalf("Stat with .ipynb suffix failed: %v", err)
+	}
+	wsInfo := info.(WSFileInfo)
+	if !wsInfo.IsNotebook() {
+		t.Error("Expected IsNotebook() to be true")
+	}
+	if wsInfo.Path != "/test/notebook" {
+		t.Errorf("Expected path /test/notebook, got %s", wsInfo.Path)
+	}
+
+	// Test 2: Stat with .ipynb suffix for non-notebook should fail
+	_, err = client.Stat(context.Background(), "/test/file.ipynb")
+	if err == nil {
+		t.Error("Expected error for .ipynb suffix on non-existent notebook")
+	}
+}
+
+// TestReadAllNotebook verifies that ReadAll exports notebooks in JUPYTER format
+func TestReadAllNotebook(t *testing.T) {
+	notebookContent := `{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":4}`
+	exportCalled := false
+	exportFormat := workspace.ExportFormatSource
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info") {
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/notebook",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Size:       int64(len(notebookContent)),
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				}
+				return nil
+			}
+			return fmt.Errorf("unexpected path: %s", path)
+		},
+	}
+
+	mockWorkspace := &MockWorkspaceClient{
+		ExportFunc: func(ctx context.Context, req workspace.ExportRequest) (*workspace.ExportResponse, error) {
+			exportCalled = true
+			exportFormat = req.Format
+			return &workspace.ExportResponse{
+				Content: base64.StdEncoding.EncodeToString([]byte(notebookContent)),
+			}, nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, nil)
+
+	data, err := client.ReadAll(context.Background(), "/test/notebook.ipynb")
+	if err != nil {
+		t.Fatalf("ReadAll failed: %v", err)
+	}
+
+	if !exportCalled {
+		t.Error("Expected Export to be called for notebook")
+	}
+	if exportFormat != workspace.ExportFormatJupyter {
+		t.Errorf("Expected JUPYTER format, got %v", exportFormat)
+	}
+	if string(data) != notebookContent {
+		t.Errorf("Expected %q, got %q", notebookContent, string(data))
+	}
+}
+
+// TestWriteNotebook verifies that Write uses Import API with JUPYTER format for notebooks
+func TestWriteNotebook(t *testing.T) {
+	notebookContent := `{"cells":[{"cell_type":"code","source":["print('hello')"]}],"metadata":{},"nbformat":4,"nbformat_minor":4}`
+	importCalled := false
+	var importedPath string
+	var importedFormat workspace.ImportFormat
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info") {
+				// Return notebook for existing path
+				if strings.Contains(path, "existing_notebook") {
+					resp := response.(*objectInfoResponse)
+					resp.WsfsObjectInfo = wsfsObjectInfo{
+						ObjectInfo: workspace.ObjectInfo{
+							Path:       "/test/existing_notebook",
+							ObjectType: workspace.ObjectTypeNotebook,
+							Size:       100,
+							ModifiedAt: time.Now().UnixMilli(),
+						},
+					}
+					return nil
+				}
+			}
+			return fs.ErrNotExist
+		},
+	}
+
+	mockWorkspace := &MockWorkspaceClient{
+		ImportFunc: func(ctx context.Context, req workspace.Import) error {
+			importCalled = true
+			importedPath = req.Path
+			importedFormat = req.Format
+			return nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, nil)
+
+	// Test 1: Write to existing notebook
+	err := client.Write(context.Background(), "/test/existing_notebook.ipynb", []byte(notebookContent))
+	if err != nil {
+		t.Fatalf("Write to existing notebook failed: %v", err)
+	}
+	if !importCalled {
+		t.Error("Expected Import to be called for notebook")
+	}
+	if importedFormat != workspace.ImportFormatJupyter {
+		t.Errorf("Expected JUPYTER format, got %v", importedFormat)
+	}
+	if importedPath != "/test/existing_notebook" {
+		t.Errorf("Expected path without .ipynb suffix, got %s", importedPath)
+	}
+
+	// Test 2: Write new .ipynb file (should create as notebook)
+	importCalled = false
+	err = client.Write(context.Background(), "/test/new_notebook.ipynb", []byte(notebookContent))
+	if err != nil {
+		t.Fatalf("Write new .ipynb failed: %v", err)
+	}
+	if !importCalled {
+		t.Error("Expected Import to be called for new .ipynb file")
+	}
+	if importedPath != "/test/new_notebook" {
+		t.Errorf("Expected path without .ipynb suffix, got %s", importedPath)
+	}
+}
+
+// TestDeleteNotebook verifies that Delete strips .ipynb suffix
+func TestDeleteNotebook(t *testing.T) {
+	var deletedPath string
+
+	mockWorkspace := &MockWorkspaceClient{
+		DeleteFunc: func(ctx context.Context, req workspace.Delete) error {
+			deletedPath = req.Path
+			return nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, &MockAPIClient{}, nil)
+
+	err := client.Delete(context.Background(), "/test/notebook.ipynb", false)
+	if err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+	if deletedPath != "/test/notebook" {
+		t.Errorf("Expected path without .ipynb suffix, got %s", deletedPath)
+	}
+}
+
+// TestRenameNotebook verifies that Rename strips .ipynb suffix from both paths
+func TestRenameNotebook(t *testing.T) {
+	var sourcePathUsed, destPathUsed string
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "rename") {
+				reqMap := request.(map[string]any)
+				sourcePathUsed = reqMap["source_path"].(string)
+				destPathUsed = reqMap["destination_path"].(string)
+				return nil
+			}
+			return fmt.Errorf("unexpected path: %s", path)
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, nil)
+
+	err := client.Rename(context.Background(), "/test/old.ipynb", "/test/new.ipynb")
+	if err != nil {
+		t.Fatalf("Rename failed: %v", err)
+	}
+	if sourcePathUsed != "/test/old" {
+		t.Errorf("Expected source path without .ipynb, got %s", sourcePathUsed)
+	}
+	if destPathUsed != "/test/new" {
+		t.Errorf("Expected dest path without .ipynb, got %s", destPathUsed)
+	}
+}
