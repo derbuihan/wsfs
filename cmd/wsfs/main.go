@@ -49,6 +49,16 @@ func main() {
 	// Set up disk cache
 	var diskCache *filecache.DiskCache
 	if *enableCache {
+		// Validate cache configuration
+		if *cacheSizeGB <= 0 {
+			log.Fatalf("Invalid cache size: %.2f GB (must be positive)", *cacheSizeGB)
+		}
+		if *cacheSizeGB > 1000 {
+			log.Fatalf("Invalid cache size: %.2f GB (maximum is 1000 GB)", *cacheSizeGB)
+		}
+		if *cacheTTL <= 0 {
+			log.Fatalf("Invalid cache TTL: %v (must be positive)", *cacheTTL)
+		}
 		cacheSizeBytes := int64(*cacheSizeGB * 1024 * 1024 * 1024)
 		diskCache, err = filecache.NewDiskCache(*cacheDir, cacheSizeBytes, *cacheTTL)
 		if err != nil {

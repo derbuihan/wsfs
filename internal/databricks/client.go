@@ -109,6 +109,16 @@ func (info WSFileInfo) Sys() any {
 	return info.ObjectInfo
 }
 
+// toWSFileInfo safely converts fs.FileInfo to WSFileInfo.
+// Returns zero value and false if info is nil or not a WSFileInfo.
+func toWSFileInfo(info fs.FileInfo) (WSFileInfo, bool) {
+	if info == nil {
+		return WSFileInfo{}, false
+	}
+	wsInfo, ok := info.(WSFileInfo)
+	return wsInfo, ok
+}
+
 // WSDirEntry
 
 type WSDirEntry struct {
@@ -194,8 +204,8 @@ func (c *WorkspaceFilesClient) Stat(ctx context.Context, filePath string) (fs.Fi
 		basePath := strings.TrimSuffix(filePath, ".ipynb")
 		info, err := c.statInternal(ctx, basePath)
 		if err == nil {
-			wsInfo := info.(WSFileInfo)
-			if wsInfo.IsNotebook() {
+			wsInfo, ok := toWSFileInfo(info)
+			if ok && wsInfo.IsNotebook() {
 				return info, nil
 			}
 		}
@@ -302,7 +312,10 @@ func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]
 		return nil, err
 	}
 
-	wsInfo := info.(WSFileInfo)
+	wsInfo, ok := toWSFileInfo(info)
+	if !ok {
+		return nil, fmt.Errorf("unexpected file info type for %s", filePath)
+	}
 
 	// For notebooks, use Export with JUPYTER format
 	if wsInfo.IsNotebook() {
@@ -407,8 +420,8 @@ func (c *WorkspaceFilesClient) Write(ctx context.Context, filepath string, data 
 	// Check if existing file is a notebook
 	info, err := c.Stat(ctx, filepath)
 	if err == nil {
-		wsInfo := info.(WSFileInfo)
-		if wsInfo.IsNotebook() {
+		wsInfo, ok := toWSFileInfo(info)
+		if ok && wsInfo.IsNotebook() {
 			logging.Debugf("Writing to notebook: %s", filepath)
 			return c.WriteNotebook(ctx, filepath, data)
 		}

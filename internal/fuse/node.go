@@ -226,7 +226,12 @@ func (n *WSNode) flushLocked(ctx context.Context) syscall.Errno {
 		logging.Debugf("Error refreshing file info after Flush: %v", err)
 		return 0
 	}
-	n.fileInfo = info.(databricks.WSFileInfo)
+	wsInfo, ok := info.(databricks.WSFileInfo)
+	if !ok {
+		logging.Debugf("Unexpected file info type after Flush for %s", remotePath)
+		return 0
+	}
+	n.fileInfo = wsInfo
 
 	// Update cache with new content
 	if n.diskCache != nil && !n.diskCache.IsDisabled() && n.buf.Data != nil {
@@ -414,7 +419,11 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 		return nil, syscall.ENOENT
 	}
 
-	wsInfo := info.(databricks.WSFileInfo)
+	wsInfo, ok := info.(databricks.WSFileInfo)
+	if !ok {
+		logging.Debugf("Lookup: unexpected file info type for %s", childPath)
+		return nil, syscall.EIO
+	}
 
 	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo}
 	childNode.fillAttr(ctx, &out.Attr)
@@ -440,8 +449,8 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 	if n.buf.Data != nil && !n.buf.Dirty {
 		info, err := n.wfClient.Stat(ctx, n.Path())
 		if err == nil {
-			wsInfo := info.(databricks.WSFileInfo)
-			if wsInfo.ModTime().After(n.fileInfo.ModTime()) {
+			wsInfo, ok := info.(databricks.WSFileInfo)
+			if ok && wsInfo.ModTime().After(n.fileInfo.ModTime()) {
 				// Remote file was modified, invalidate cache
 				logging.Debugf("Remote file modified, invalidating cache for %s", n.Path())
 				n.buf.Data = nil
@@ -618,7 +627,11 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 		return nil, nil, 0, syscall.EIO
 	}
 
-	wsInfo := info.(databricks.WSFileInfo)
+	wsInfo, ok := info.(databricks.WSFileInfo)
+	if !ok {
+		logging.Debugf("Create: unexpected file info type for %s", childPath)
+		return nil, nil, 0, syscall.EIO
+	}
 	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo, buf: fileBuffer{Data: initialContent}}
 	childNode.fillAttr(ctx, &out.Attr)
 
@@ -685,7 +698,11 @@ func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 		return nil, syscall.EIO
 	}
 
-	wsInfo := info.(databricks.WSFileInfo)
+	wsInfo, ok := info.(databricks.WSFileInfo)
+	if !ok {
+		logging.Debugf("Mkdir: unexpected file info type for %s", childPath)
+		return nil, syscall.EIO
+	}
 	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo}
 	childNode.fillAttr(ctx, &out.Attr)
 
@@ -787,7 +804,10 @@ func NewRootNode(wfClient databricks.WorkspaceFilesAPI, diskCache *filecache.Dis
 		return nil, err
 	}
 
-	wsInfo := info.(databricks.WSFileInfo)
+	wsInfo, ok := info.(databricks.WSFileInfo)
+	if !ok {
+		return nil, fmt.Errorf("unexpected file info type for root path %s", rootPath)
+	}
 	if !wsInfo.IsDir() {
 		return nil, syscall.ENOTDIR
 	}
