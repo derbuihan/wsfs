@@ -2,7 +2,6 @@ package fuse
 
 import (
 	"context"
-	"io/fs"
 	"testing"
 
 	"github.com/databricks/databricks-sdk-go/service/workspace"
@@ -10,40 +9,6 @@ import (
 	"wsfs/internal/buffer"
 	"wsfs/internal/databricks"
 )
-
-type fakeWorkspaceAPI struct {
-	readAllData []byte
-}
-
-func (f *fakeWorkspaceAPI) Stat(ctx context.Context, filePath string) (fs.FileInfo, error) {
-	return nil, fs.ErrNotExist
-}
-
-func (f *fakeWorkspaceAPI) ReadDir(ctx context.Context, dirPath string) ([]fs.DirEntry, error) {
-	return nil, fs.ErrNotExist
-}
-
-func (f *fakeWorkspaceAPI) ReadAll(ctx context.Context, filePath string) ([]byte, error) {
-	return f.readAllData, nil
-}
-
-func (f *fakeWorkspaceAPI) Write(ctx context.Context, filepath string, data []byte) error {
-	return nil
-}
-
-func (f *fakeWorkspaceAPI) Delete(ctx context.Context, filePath string, recursive bool) error {
-	return nil
-}
-
-func (f *fakeWorkspaceAPI) Mkdir(ctx context.Context, dirPath string) error {
-	return nil
-}
-
-func (f *fakeWorkspaceAPI) Rename(ctx context.Context, sourcePath string, destinationPath string) error {
-	return nil
-}
-
-func (f *fakeWorkspaceAPI) CacheSet(path string, info fs.FileInfo) {}
 
 func TestWSNodeTruncateLockedShrinks(t *testing.T) {
 	n := &WSNode{
@@ -68,7 +33,11 @@ func TestWSNodeTruncateLockedShrinks(t *testing.T) {
 }
 
 func TestWSNodeWriteExtendsBuffer(t *testing.T) {
-	api := &fakeWorkspaceAPI{readAllData: []byte("hi")}
+	api := &databricks.FakeWorkspaceAPI{
+		ReadAllFunc: func(ctx context.Context, filePath string) ([]byte, error) {
+			return []byte("hi"), nil
+		},
+	}
 	n := &WSNode{
 		wfClient: api,
 		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{

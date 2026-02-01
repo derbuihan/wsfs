@@ -99,8 +99,16 @@ type apiDoer interface {
 		visitors ...func(*http.Request) error) error
 }
 
+// workspaceClient is a thin interface that defines only the methods we need from workspace.WorkspaceInterface
+// This makes testing easier without having to implement the entire interface
+type workspaceClient interface {
+	Export(ctx context.Context, request workspace.ExportRequest) (*workspace.ExportResponse, error)
+	Delete(ctx context.Context, request workspace.Delete) error
+	Mkdirs(ctx context.Context, request workspace.Mkdirs) error
+}
+
 type WorkspaceFilesClient struct {
-	workspaceClient workspace.WorkspaceInterface
+	workspaceClient workspaceClient
 	apiClient       apiDoer
 	cache           *cache.Cache
 }
@@ -114,7 +122,7 @@ func NewWorkspaceFilesClient(w *databricks.WorkspaceClient) (*WorkspaceFilesClie
 	return NewWorkspaceFilesClientWithDeps(w.Workspace, databricksClient, nil), nil
 }
 
-func NewWorkspaceFilesClientWithDeps(workspaceClient workspace.WorkspaceInterface, apiClient apiDoer, c *cache.Cache) *WorkspaceFilesClient {
+func NewWorkspaceFilesClientWithDeps(workspaceClient workspaceClient, apiClient apiDoer, c *cache.Cache) *WorkspaceFilesClient {
 	if c == nil {
 		c = cache.NewCache(60 * time.Second)
 	}
