@@ -106,6 +106,13 @@ echo ""
 # Run cache sync tests
 bash "$ROOT_DIR/scripts/cache_sync_test.sh" "$MOUNT_DIR"
 
+echo ""
+echo "Running Databricks CLI verification tests..."
+echo ""
+
+# Run Databricks CLI verification tests
+bash "$ROOT_DIR/scripts/databricks_cli_verification_test.sh" "$MOUNT_DIR"
+
 # Unmount
 cleanup
 sleep 2
