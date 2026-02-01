@@ -1,4 +1,4 @@
-package main
+package databricks
 
 import (
 	"bytes"
@@ -17,6 +17,9 @@ import (
 	"github.com/databricks/databricks-sdk-go"
 	"github.com/databricks/databricks-sdk-go/client"
 	"github.com/databricks/databricks-sdk-go/service/workspace"
+
+	"wsfs/internal/cache"
+	"wsfs/internal/logging"
 )
 
 // WSFileInfo
@@ -99,7 +102,7 @@ type apiDoer interface {
 type WorkspaceFilesClient struct {
 	workspaceClient workspace.WorkspaceInterface
 	apiClient       apiDoer
-	cache           *Cache
+	cache           *cache.Cache
 }
 
 func NewWorkspaceFilesClient(w *databricks.WorkspaceClient) (*WorkspaceFilesClient, error) {
@@ -111,14 +114,14 @@ func NewWorkspaceFilesClient(w *databricks.WorkspaceClient) (*WorkspaceFilesClie
 	return NewWorkspaceFilesClientWithDeps(w.Workspace, databricksClient, nil), nil
 }
 
-func NewWorkspaceFilesClientWithDeps(workspaceClient workspace.WorkspaceInterface, apiClient apiDoer, cache *Cache) *WorkspaceFilesClient {
-	if cache == nil {
-		cache = NewCache(60 * time.Second)
+func NewWorkspaceFilesClientWithDeps(workspaceClient workspace.WorkspaceInterface, apiClient apiDoer, c *cache.Cache) *WorkspaceFilesClient {
+	if c == nil {
+		c = cache.NewCache(60 * time.Second)
 	}
 	return &WorkspaceFilesClient{
 		workspaceClient: workspaceClient,
 		apiClient:       apiClient,
-		cache:           cache,
+		cache:           c,
 	}
 }
 
@@ -222,10 +225,10 @@ func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]
 	if wsInfo.SignedURL != "" {
 		data, err := c.readViaSignedURL(ctx, wsInfo.SignedURL, wsInfo.SignedURLHeaders)
 		if err == nil {
-			debugf("Read via signed URL succeeded for path: %s", filePath)
+			logging.Debugf("Read via signed URL succeeded for path: %s", filePath)
 			return data, nil
 		}
-		debugf("Read via signed URL failed for path: %s, falling back to Export: %v", filePath, err)
+		logging.Debugf("Read via signed URL failed for path: %s, falling back to Export: %v", filePath, err)
 	}
 
 	// 3. Fallback: workspace.Export
@@ -310,18 +313,18 @@ func (c *WorkspaceFilesClient) Write(ctx context.Context, filepath string, data 
 	// 1. Try new-files (experimental)
 	err := c.writeViaNewFiles(ctx, filepath, data)
 	if err == nil {
-		debugf("Write via new-files succeeded for path: %s", filepath)
+		logging.Debugf("Write via new-files succeeded for path: %s", filepath)
 		return nil
 	}
-	debugf("Write via new-files failed for path: %s, trying write-files: %v", filepath, err)
+	logging.Debugf("Write via new-files failed for path: %s, trying write-files: %v", filepath, err)
 
 	// 2. Try write-files (experimental)
 	err = c.writeViaWriteFiles(ctx, filepath, data)
 	if err == nil {
-		debugf("Write via write-files succeeded for path: %s", filepath)
+		logging.Debugf("Write via write-files succeeded for path: %s", filepath)
 		return nil
 	}
-	debugf("Write via write-files failed for path: %s, falling back to import-file: %v", filepath, err)
+	logging.Debugf("Write via write-files failed for path: %s, falling back to import-file: %v", filepath, err)
 
 	// 3. Fallback: import-file
 	urlPath := fmt.Sprintf(

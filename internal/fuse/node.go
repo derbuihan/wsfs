@@ -1,6 +1,10 @@
-package main
+package fuse
 
 import (
+
+	"wsfs/internal/buffer"
+	"wsfs/internal/databricks"
+	"wsfs/internal/logging"
 	"context"
 	"hash/fnv"
 	"path"
@@ -14,9 +18,9 @@ import (
 
 type WSNode struct {
 	fs.Inode
-	wfClient WorkspaceFilesAPI
-	fileInfo WSFileInfo
-	buf      fileBuffer
+	wfClient databricks.WorkspaceFilesAPI
+	fileInfo databricks.WSFileInfo
+	buf      buffer.FileBuffer
 	mu       sync.Mutex
 }
 
@@ -45,7 +49,7 @@ func (n *WSNode) Path() string {
 	return n.fileInfo.Path
 }
 
-func stableIno(info WSFileInfo) uint64 {
+func stableIno(info databricks.WSFileInfo) uint64 {
 	if info.ObjectId > 0 {
 		return uint64(info.ObjectId)
 	}
@@ -69,7 +73,7 @@ func hashStringToIno(s string) uint64 {
 }
 
 func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
-	if n.buf.data != nil {
+	if n.buf.Data != nil {
 		return 0
 	}
 	if n.fileInfo.IsDir() {
@@ -79,24 +83,24 @@ func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
 	if err != nil {
 		return syscall.EIO
 	}
-	n.buf.data = data
+	n.buf.Data = data
 	return 0
 }
 
 func (n *WSNode) truncateLocked(size uint64) {
-	if n.buf.data == nil {
-		n.buf.data = []byte{}
+	if n.buf.Data == nil {
+		n.buf.Data = []byte{}
 	}
-	cur := uint64(len(n.buf.data))
+	cur := uint64(len(n.buf.Data))
 	if cur > size {
-		n.buf.data = n.buf.data[:size]
+		n.buf.Data = n.buf.Data[:size]
 	} else if cur < size {
 		newData := make([]byte, size)
-		copy(newData, n.buf.data)
-		n.buf.data = newData
+		copy(newData, n.buf.Data)
+		n.buf.Data = newData
 	}
 	n.fileInfo.ObjectInfo.Size = int64(size)
-	n.buf.dirty = true
+	n.buf.Dirty = true
 }
 
 func (n *WSNode) markModifiedLocked(t time.Time) {
@@ -104,23 +108,23 @@ func (n *WSNode) markModifiedLocked(t time.Time) {
 }
 
 func (n *WSNode) flushLocked(ctx context.Context) syscall.Errno {
-	if !n.buf.dirty || n.buf.data == nil {
+	if !n.buf.Dirty || n.buf.Data == nil {
 		return 0
 	}
 
-	err := n.wfClient.Write(ctx, n.Path(), n.buf.data)
+	err := n.wfClient.Write(ctx, n.Path(), n.buf.Data)
 	if err != nil {
-		debugf("Error writting back on Flush: %v", err)
+		logging.Debugf("Error writting back on Flush: %v", err)
 		return syscall.EIO
 	}
-	n.buf.dirty = false
+	n.buf.Dirty = false
 
 	info, err := n.wfClient.Stat(ctx, n.Path())
 	if err != nil {
-		debugf("Error refreshing file info after Flush: %v", err)
+		logging.Debugf("Error refreshing file info after Flush: %v", err)
 		return 0
 	}
-	n.fileInfo = info.(WSFileInfo)
+	n.fileInfo = info.(databricks.WSFileInfo)
 
 	return 0
 }
@@ -157,7 +161,7 @@ func (n *WSNode) fillAttr(ctx context.Context, out *fuse.Attr) {
 }
 
 func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	debugf("Getattr called on path: %s", n.Path())
+	logging.Debugf("Getattr called on path: %s", n.Path())
 
 	n.fillAttr(ctx, &out.Attr)
 	out.SetTimeout(60)
@@ -166,12 +170,12 @@ func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 }
 
 func (n *WSNode) Access(ctx context.Context, mask uint32) syscall.Errno {
-	debugf("Access called on path: %s (mask: %d)", n.Path(), mask)
+	logging.Debugf("Access called on path: %s (mask: %d)", n.Path(), mask)
 	return 0
 }
 
 func (n *WSNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
-	debugf("Statfs called on path: %s", n.Path())
+	logging.Debugf("Statfs called on path: %s", n.Path())
 
 	const blockSize = uint32(4096)
 	const totalBlocks = uint64(1 << 30)
@@ -190,7 +194,7 @@ func (n *WSNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno 
 }
 
 func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
-	debugf("Setattr called on path: %s", n.Path())
+	logging.Debugf("Setattr called on path: %s", n.Path())
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -218,7 +222,7 @@ func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttr
 		if n.fileInfo.IsDir() {
 			return syscall.EISDIR
 		}
-		if size > 0 && n.buf.data == nil {
+		if size > 0 && n.buf.Data == nil {
 			if errno := n.ensureDataLocked(ctx); errno != 0 {
 				return errno
 			}
@@ -253,7 +257,7 @@ func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttr
 }
 
 func (n *WSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	debugf("Readdir called on path: %s", n.Path())
+	logging.Debugf("Readdir called on path: %s", n.Path())
 
 	if !n.fileInfo.IsDir() {
 		return nil, syscall.ENOTDIR
@@ -277,7 +281,7 @@ func (n *WSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 }
 
 func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	debugf("Lookup called on path: %s/%s", n.Path(), name)
+	logging.Debugf("Lookup called on path: %s/%s", n.Path(), name)
 	if !n.fileInfo.IsDir() {
 		return nil, syscall.ENOTDIR
 	}
@@ -289,7 +293,7 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 		return nil, syscall.ENOENT
 	}
 
-	wsInfo := info.(WSFileInfo)
+	wsInfo := info.(databricks.WSFileInfo)
 
 	childNode := &WSNode{wfClient: n.wfClient, fileInfo: wsInfo}
 	childNode.fillAttr(ctx, &out.Attr)
@@ -302,7 +306,7 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 }
 
 func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	debugf("Open called on path: %s", n.Path())
+	logging.Debugf("Open called on path: %s", n.Path())
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -312,11 +316,11 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 	}
 
 	if flags&syscall.O_TRUNC != 0 {
-		n.buf.data = []byte{}
+		n.buf.Data = []byte{}
 		n.fileInfo.ObjectInfo.Size = 0
 		n.markModifiedLocked(time.Now())
-		n.buf.dirty = true
-	} else if n.buf.data == nil {
+		n.buf.Dirty = true
+	} else if n.buf.Data == nil {
 		if errno := n.ensureDataLocked(ctx); errno != 0 {
 			return nil, 0, errno
 		}
@@ -333,7 +337,7 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 }
 
 func (n *WSNode) Opendir(ctx context.Context) syscall.Errno {
-	debugf("Opendir called on path: %s", n.Path())
+	logging.Debugf("Opendir called on path: %s", n.Path())
 
 	if !n.fileInfo.IsDir() {
 		return syscall.ENOTDIR
@@ -343,7 +347,7 @@ func (n *WSNode) Opendir(ctx context.Context) syscall.Errno {
 }
 
 func (n *WSNode) OpendirHandle(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	debugf("OpendirHandle called on path: %s", n.Path())
+	logging.Debugf("OpendirHandle called on path: %s", n.Path())
 
 	if !n.fileInfo.IsDir() {
 		return nil, 0, syscall.ENOTDIR
@@ -359,61 +363,61 @@ func (n *WSNode) OpendirHandle(ctx context.Context, flags uint32) (fs.FileHandle
 }
 
 func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	debugf("Read called on path: %s, offset: %d, size: %d", n.Path(), off, len(dest))
+	logging.Debugf("Read called on path: %s, offset: %d, size: %d", n.Path(), off, len(dest))
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	if n.buf.data == nil {
+	if n.buf.Data == nil {
 		if errno := n.ensureDataLocked(ctx); errno != 0 {
 			return nil, errno
 		}
 	}
 
 	end := off + int64(len(dest))
-	if end > int64(len(n.buf.data)) {
-		end = int64(len(n.buf.data))
+	if end > int64(len(n.buf.Data)) {
+		end = int64(len(n.buf.Data))
 	}
 
-	if off >= int64(len(n.buf.data)) {
+	if off >= int64(len(n.buf.Data)) {
 		return fuse.ReadResultData([]byte{}), 0
 	}
 
-	result := n.buf.data[off:end]
+	result := n.buf.Data[off:end]
 	return fuse.ReadResultData(result), 0
 }
 
 func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
-	debugf("Write called on path: %s, offset: %d, size: %d", n.Path(), off, len(data))
+	logging.Debugf("Write called on path: %s, offset: %d, size: %d", n.Path(), off, len(data))
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if off < 0 {
 		return 0, syscall.EINVAL
 	}
-	if n.buf.data == nil {
+	if n.buf.Data == nil {
 		if errno := n.ensureDataLocked(ctx); errno != 0 {
 			return 0, errno
 		}
 	}
 
 	end := off + int64(len(data))
-	if int64(len(n.buf.data)) < end {
+	if int64(len(n.buf.Data)) < end {
 		newData := make([]byte, end)
-		copy(newData, n.buf.data)
-		n.buf.data = newData
+		copy(newData, n.buf.Data)
+		n.buf.Data = newData
 	}
-	copy(n.buf.data[off:], data)
+	copy(n.buf.Data[off:], data)
 
-	n.fileInfo.ObjectInfo.Size = int64(len(n.buf.data))
+	n.fileInfo.ObjectInfo.Size = int64(len(n.buf.Data))
 	n.markModifiedLocked(time.Now())
-	n.buf.dirty = true
+	n.buf.Dirty = true
 
 	return uint32(len(data)), 0
 }
 
 func (n *WSNode) Flush(ctx context.Context, fh fs.FileHandle) syscall.Errno {
-	debugf("Flush called on path: %s", n.Path())
+	logging.Debugf("Flush called on path: %s", n.Path())
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -422,7 +426,7 @@ func (n *WSNode) Flush(ctx context.Context, fh fs.FileHandle) syscall.Errno {
 }
 
 func (n *WSNode) Fsync(ctx context.Context, fh fs.FileHandle, flags uint32) syscall.Errno {
-	debugf("Fsync called on path: %s", n.Path())
+	logging.Debugf("Fsync called on path: %s", n.Path())
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -431,39 +435,39 @@ func (n *WSNode) Fsync(ctx context.Context, fh fs.FileHandle, flags uint32) sysc
 }
 
 func (n *WSNode) Release(ctx context.Context, fh fs.FileHandle) syscall.Errno {
-	debugf("Release called on path: %s", n.Path())
+	logging.Debugf("Release called on path: %s", n.Path())
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	errno := n.flushLocked(ctx)
 	if errno == 0 {
-		n.buf.data = nil
-		n.buf.dirty = false
+		n.buf.Data = nil
+		n.buf.Dirty = false
 	}
 
 	return errno
 }
 
 func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
-	debugf("Create called in dir: %s, for file: %s", n.Path(), name)
+	logging.Debugf("Create called in dir: %s, for file: %s", n.Path(), name)
 
 	childPath := path.Join(n.Path(), name)
 
 	err := n.wfClient.Write(ctx, childPath, []byte{})
 	if err != nil {
-		debugf("Error creating file on databricks: %v", err)
+		logging.Debugf("Error creating file on databricks: %v", err)
 		return nil, nil, 0, syscall.EIO
 	}
 
 	info, err := n.wfClient.Stat(ctx, childPath)
 	if err != nil {
-		debugf("Error stating new file: %v", err)
+		logging.Debugf("Error stating new file: %v", err)
 		return nil, nil, 0, syscall.EIO
 	}
 
-	wsInfo := info.(WSFileInfo)
-	childNode := &WSNode{wfClient: n.wfClient, fileInfo: wsInfo, buf: fileBuffer{data: []byte{}}}
+	wsInfo := info.(databricks.WSFileInfo)
+	childNode := &WSNode{wfClient: n.wfClient, fileInfo: wsInfo, buf: buffer.FileBuffer{Data: []byte{}}}
 	childNode.fillAttr(ctx, &out.Attr)
 
 	out.SetEntryTimeout(60)
@@ -474,7 +478,7 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 }
 
 func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
-	debugf("Unlink called in dir: %s, for file: %s", n.Path(), name)
+	logging.Debugf("Unlink called in dir: %s, for file: %s", n.Path(), name)
 
 	childPath := path.Join(n.Path(), name)
 
@@ -489,7 +493,7 @@ func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
 
 	err = n.wfClient.Delete(ctx, childPath, false)
 	if err != nil {
-		debugf("Error deleting file on databricks: %v", err)
+		logging.Debugf("Error deleting file on databricks: %v", err)
 		return syscall.EIO
 	}
 
@@ -497,22 +501,22 @@ func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
 }
 
 func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	debugf("Mkdir called in dir: %s, for new dir: %s", n.Path(), name)
+	logging.Debugf("Mkdir called in dir: %s, for new dir: %s", n.Path(), name)
 
 	childPath := path.Join(n.Path(), name)
 	err := n.wfClient.Mkdir(ctx, childPath)
 	if err != nil {
-		debugf("Error creating directory on databricks: %v", err)
+		logging.Debugf("Error creating directory on databricks: %v", err)
 		return nil, syscall.EIO
 	}
 
 	info, err := n.wfClient.Stat(ctx, childPath)
 	if err != nil {
-		debugf("Error stating new directory: %v", err)
+		logging.Debugf("Error stating new directory: %v", err)
 		return nil, syscall.EIO
 	}
 
-	wsInfo := info.(WSFileInfo)
+	wsInfo := info.(databricks.WSFileInfo)
 	childNode := &WSNode{wfClient: n.wfClient, fileInfo: wsInfo}
 	childNode.fillAttr(ctx, &out.Attr)
 
@@ -521,7 +525,7 @@ func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 }
 
 func (n *WSNode) Rmdir(ctx context.Context, name string) syscall.Errno {
-	debugf("Rmdir called in dir: %s, for dir: %s", n.Path(), name)
+	logging.Debugf("Rmdir called in dir: %s, for dir: %s", n.Path(), name)
 
 	childPath := path.Join(n.Path(), name)
 
@@ -535,7 +539,7 @@ func (n *WSNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 	err = n.wfClient.Delete(ctx, childPath, false)
 	if err != nil {
-		debugf("Error deleting directory on databricks: %v", err)
+		logging.Debugf("Error deleting directory on databricks: %v", err)
 		return syscall.EIO
 	}
 
@@ -543,7 +547,7 @@ func (n *WSNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 }
 
 func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
-	debugf("Rename called from %s to %s", name, newName)
+	logging.Debugf("Rename called from %s to %s", name, newName)
 
 	newParentNode, ok := newParent.EmbeddedInode().Operations().(*WSNode)
 	if !ok {
@@ -562,7 +566,7 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 	if childInode != nil {
 		childNode, ok := childInode.Operations().(*WSNode)
 		if ok {
-			debugf("Updating internal path for in-memory node from '%s' to '%s'", childNode.fileInfo.Path, newPath)
+			logging.Debugf("Updating internal path for in-memory node from '%s' to '%s'", childNode.fileInfo.Path, newPath)
 			childNode.fileInfo.Path = newPath
 		}
 	}
@@ -571,26 +575,26 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 }
 
 func (n *WSNode) OnForget() {
-	debugf("OnForget called on path: %s", n.Path())
+	logging.Debugf("OnForget called on path: %s", n.Path())
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	if n.buf.dirty {
+	if n.buf.Dirty {
 		return
 	}
-	n.buf.data = nil
-	n.buf.dirty = false
+	n.buf.Data = nil
+	n.buf.Dirty = false
 }
 
-func NewRootNode(wfClient WorkspaceFilesAPI, rootPath string) (*WSNode, error) {
+func NewRootNode(wfClient databricks.WorkspaceFilesAPI, rootPath string) (*WSNode, error) {
 	info, err := wfClient.Stat(context.Background(), rootPath)
 
 	if err != nil {
 		return nil, err
 	}
 
-	wsInfo := info.(WSFileInfo)
+	wsInfo := info.(databricks.WSFileInfo)
 	if !wsInfo.IsDir() {
 		return nil, syscall.ENOTDIR
 	}

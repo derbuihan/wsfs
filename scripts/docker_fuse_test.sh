@@ -22,7 +22,7 @@ BIN_DIR=${WSFS_BIN_DIR:-"$ROOT_DIR/tmp"}
 
 mkdir -p "$MOUNT_DIR" "$BIN_DIR"
 
-"$GO_BIN" build -o "$BIN_DIR/wsfs"
+"$GO_BIN" build -o "$BIN_DIR/wsfs" ./cmd/wsfs
 
 "$BIN_DIR/wsfs" "$MOUNT_DIR" &
 WSFS_PID=$!
