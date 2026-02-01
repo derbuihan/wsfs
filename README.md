@@ -11,7 +11,7 @@ A FUSE-based file system to interact with Databricks workspace files and directo
 - [x] Make files and directories.
 - [x] Delete files and directories.
 - [x] Support for filesystem operations (`Rename`, `Fsync` and `Setattr`).
-- [ ] Cache files for faster access. (in progress)
+- [x] Disk-based file caching with TTL and LRU eviction for faster access.
 
 Notes:
 - `Setattr` currently supports size changes (truncate) and mtime updates. atime-only updates return ENOTSUP. chmod/chown also return ENOTSUP.
@@ -83,6 +83,53 @@ $ ls
 Repos  Shared  Users
 ```
 
+## Cache Configuration
+
+wsfs includes a disk-based caching system to improve read performance and reduce bandwidth usage. The cache uses SHA256 hashing for file naming and implements both TTL (Time To Live) and LRU (Least Recently Used) eviction strategies.
+
+### Cache Options
+
+```bash
+# Enable cache (default: true)
+$ ./wsfs --cache=true <mount-point>
+
+# Disable cache
+$ ./wsfs --cache=false <mount-point>
+
+# Custom cache directory (default: /tmp/wsfs-cache)
+$ ./wsfs --cache-dir=/path/to/cache <mount-point>
+
+# Custom cache size in GB (default: 10GB)
+$ ./wsfs --cache-size=5 <mount-point>
+
+# Custom cache TTL (default: 24h)
+$ ./wsfs --cache-ttl=1h <mount-point>
+$ ./wsfs --cache-ttl=30m <mount-point>
+```
+
+### Cache Behavior
+
+- **Cache Hit**: When reading a file, if a valid cache entry exists (not expired, remote file not modified), data is read from local cache.
+- **Cache Miss**: When no valid cache entry exists, data is fetched from Databricks and cached for future reads.
+- **Automatic Invalidation**: Cache entries are automatically invalidated when:
+  - Remote file is modified (detected via modification time)
+  - File is deleted or renamed locally
+  - TTL expires
+  - Cache is full and LRU eviction is triggered
+- **Write-Through**: When writing files, data is written to Databricks and the cache is updated on successful flush.
+
+### Cache Monitoring
+
+When running with `--debug` flag, cache operations are logged:
+
+```bash
+$ ./wsfs --debug --cache=true <mount-point>
+# Look for log messages:
+# - "Cache hit for /path/to/file"
+# - "Cache miss for /path/to/file, fetching from remote"
+# - "Cached file /path/to/file (1234 bytes)"
+```
+
 ## Testing
 
 ### Docker (recommended on macOS)
@@ -90,12 +137,47 @@ Repos  Shared  Users
 This uses `docker-compose.yml` and runs the test script (`scripts/fuse_test.sh`) inside a privileged container with FUSE enabled. The Docker image includes Vim so the save-path tests run in CI.
 
 ```bash
+# Run standard FUSE tests
 $ docker compose run --rm --build wsfs-test
+
+# Run comprehensive cache tests
+$ docker compose run --rm --build wsfs-cache-test
 ```
 
 Notes:
 - The container reads `DATABRICKS_HOST` and `DATABRICKS_TOKEN` from `.env` via `env_file`.
 - `.env` is intentionally excluded from Git. Do not commit secrets.
+
+### Cache Tests
+
+The cache test suite (`scripts/cache_test.sh` and `scripts/cache_sync_test.sh`) verifies:
+
+1. **Basic Cache Operations**
+   - Cache hit/miss behavior
+   - Cache persistence across reads
+   - Concurrent file access
+
+2. **Cache Invalidation**
+   - Invalidation on file write
+   - Invalidation on file delete
+   - Invalidation on file rename
+   - Invalidation on truncate
+
+3. **Cache Synchronization**
+   - Detection of remote file modifications via Databricks API
+   - Cache behavior after flush operations
+   - Multiple file modifications
+
+4. **Eviction Strategies**
+   - TTL-based expiration (tested with 5s TTL)
+   - LRU-based eviction (tested with 1MB cache size)
+   - Cache disabled mode
+
+The comprehensive cache test (`docker_cache_test.sh`) runs four test configurations:
+- Default settings (10GB cache, 24h TTL)
+- Cache disabled mode
+- Short TTL (5 seconds)
+- Small cache size (1MB, triggers LRU eviction)
 
 ### Linux (direct)
 

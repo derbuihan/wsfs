@@ -15,3 +15,25 @@ services:
     volumes:
       - .:/work
     working_dir: /work
+
+  wsfs-cache-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    privileged: true
+    devices:
+      - /dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    env_file:
+      - .env
+    volumes:
+      - .:/work
+      - wsfs-cache:/tmp/wsfs-cache-test
+    working_dir: /work
+    command: ["bash", "./scripts/docker_cache_test.sh"]
+
+volumes:
+  wsfs-cache:

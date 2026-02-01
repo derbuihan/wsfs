@@ -1,12 +1,9 @@
 package fuse
 
 import (
-
-	"wsfs/internal/buffer"
-	"wsfs/internal/databricks"
-	"wsfs/internal/logging"
 	"context"
 	"hash/fnv"
+	"os"
 	"path"
 	"sync"
 	"syscall"
@@ -14,14 +11,20 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+
+	"wsfs/internal/buffer"
+	"wsfs/internal/databricks"
+	"wsfs/internal/filecache"
+	"wsfs/internal/logging"
 )
 
 type WSNode struct {
 	fs.Inode
-	wfClient databricks.WorkspaceFilesAPI
-	fileInfo databricks.WSFileInfo
-	buf      buffer.FileBuffer
-	mu       sync.Mutex
+	wfClient  databricks.WorkspaceFilesAPI
+	diskCache *filecache.DiskCache
+	fileInfo  databricks.WSFileInfo
+	buf       buffer.FileBuffer
+	mu        sync.Mutex
 }
 
 var _ = (fs.NodeGetattrer)((*WSNode)(nil))
@@ -79,11 +82,45 @@ func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
 	if n.fileInfo.IsDir() {
 		return syscall.EISDIR
 	}
-	data, err := n.wfClient.ReadAll(ctx, n.Path())
+
+	remotePath := n.Path()
+	remoteModTime := n.fileInfo.ModTime()
+
+	// Try to get from cache first
+	if n.diskCache != nil && !n.diskCache.IsDisabled() {
+		cachedPath, found := n.diskCache.Get(remotePath, remoteModTime)
+		if found {
+			// Read from cached file
+			data, err := os.ReadFile(cachedPath)
+			if err == nil {
+				logging.Debugf("Cache hit for %s", remotePath)
+				n.buf.Data = data
+				return 0
+			}
+			// Cache read failed, fall through to remote read
+			logging.Debugf("Cache read failed for %s: %v", remotePath, err)
+		}
+	}
+
+	// Cache miss or disabled - read from remote
+	logging.Debugf("Cache miss for %s, fetching from remote", remotePath)
+	data, err := n.wfClient.ReadAll(ctx, remotePath)
 	if err != nil {
 		return syscall.EIO
 	}
 	n.buf.Data = data
+
+	// Store in cache
+	if n.diskCache != nil && !n.diskCache.IsDisabled() {
+		_, err := n.diskCache.Set(remotePath, data, remoteModTime)
+		if err != nil {
+			// Log error but don't fail the operation
+			logging.Debugf("Failed to cache file %s: %v", remotePath, err)
+		} else {
+			logging.Debugf("Cached file %s (%d bytes)", remotePath, len(data))
+		}
+	}
+
 	return 0
 }
 
@@ -112,19 +149,30 @@ func (n *WSNode) flushLocked(ctx context.Context) syscall.Errno {
 		return 0
 	}
 
-	err := n.wfClient.Write(ctx, n.Path(), n.buf.Data)
+	remotePath := n.Path()
+	err := n.wfClient.Write(ctx, remotePath, n.buf.Data)
 	if err != nil {
 		logging.Debugf("Error writting back on Flush: %v", err)
 		return syscall.EIO
 	}
 	n.buf.Dirty = false
 
-	info, err := n.wfClient.Stat(ctx, n.Path())
+	info, err := n.wfClient.Stat(ctx, remotePath)
 	if err != nil {
 		logging.Debugf("Error refreshing file info after Flush: %v", err)
 		return 0
 	}
 	n.fileInfo = info.(databricks.WSFileInfo)
+
+	// Update cache with new content
+	if n.diskCache != nil && !n.diskCache.IsDisabled() && n.buf.Data != nil {
+		_, err := n.diskCache.Set(remotePath, n.buf.Data, n.fileInfo.ModTime())
+		if err != nil {
+			logging.Debugf("Failed to update cache after flush for %s: %v", remotePath, err)
+		} else {
+			logging.Debugf("Updated cache after flush for %s", remotePath)
+		}
+	}
 
 	return 0
 }
@@ -295,7 +343,7 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 
 	wsInfo := info.(databricks.WSFileInfo)
 
-	childNode := &WSNode{wfClient: n.wfClient, fileInfo: wsInfo}
+	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo}
 	childNode.fillAttr(ctx, &out.Attr)
 
 	out.SetEntryTimeout(60)
@@ -467,7 +515,7 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 	}
 
 	wsInfo := info.(databricks.WSFileInfo)
-	childNode := &WSNode{wfClient: n.wfClient, fileInfo: wsInfo, buf: buffer.FileBuffer{Data: []byte{}}}
+	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo, buf: buffer.FileBuffer{Data: []byte{}}}
 	childNode.fillAttr(ctx, &out.Attr)
 
 	out.SetEntryTimeout(60)
@@ -497,6 +545,13 @@ func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return syscall.EIO
 	}
 
+	// Remove from cache
+	if n.diskCache != nil && !n.diskCache.IsDisabled() {
+		if err := n.diskCache.Delete(childPath); err != nil {
+			logging.Debugf("Failed to delete from cache %s: %v", childPath, err)
+		}
+	}
+
 	return 0
 }
 
@@ -517,7 +572,7 @@ func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 	}
 
 	wsInfo := info.(databricks.WSFileInfo)
-	childNode := &WSNode{wfClient: n.wfClient, fileInfo: wsInfo}
+	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo}
 	childNode.fillAttr(ctx, &out.Attr)
 
 	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode), Ino: stableIno(wsInfo)})
@@ -562,6 +617,13 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 		return syscall.EIO
 	}
 
+	// Delete old path from cache (new path will be cached on next access)
+	if n.diskCache != nil && !n.diskCache.IsDisabled() {
+		if err := n.diskCache.Delete(oldPath); err != nil {
+			logging.Debugf("Failed to delete old path from cache %s: %v", oldPath, err)
+		}
+	}
+
 	childInode := n.GetChild(name)
 	if childInode != nil {
 		childNode, ok := childInode.Operations().(*WSNode)
@@ -587,7 +649,7 @@ func (n *WSNode) OnForget() {
 	n.buf.Dirty = false
 }
 
-func NewRootNode(wfClient databricks.WorkspaceFilesAPI, rootPath string) (*WSNode, error) {
+func NewRootNode(wfClient databricks.WorkspaceFilesAPI, diskCache *filecache.DiskCache, rootPath string) (*WSNode, error) {
 	info, err := wfClient.Stat(context.Background(), rootPath)
 
 	if err != nil {
@@ -600,7 +662,8 @@ func NewRootNode(wfClient databricks.WorkspaceFilesAPI, rootPath string) (*WSNod
 	}
 
 	return &WSNode{
-		wfClient: wfClient,
-		fileInfo: wsInfo,
+		wfClient:  wfClient,
+		diskCache: diskCache,
+		fileInfo:  wsInfo,
 	}, nil
 }
