@@ -26,6 +26,7 @@ var _ = (fs.NodeReaddirer)((*WSNode)(nil))
 var _ = (fs.NodeLookuper)((*WSNode)(nil))
 var _ = (fs.NodeOpener)((*WSNode)(nil))
 var _ = (fs.NodeOpendirer)((*WSNode)(nil))
+var _ = (fs.NodeOpendirHandler)((*WSNode)(nil))
 var _ = (fs.NodeReader)((*WSNode)(nil))
 var _ = (fs.NodeWriter)((*WSNode)(nil))
 var _ = (fs.NodeFlusher)((*WSNode)(nil))
@@ -339,6 +340,22 @@ func (n *WSNode) Opendir(ctx context.Context) syscall.Errno {
 	}
 
 	return 0
+}
+
+func (n *WSNode) OpendirHandle(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	debugf("OpendirHandle called on path: %s", n.Path())
+
+	if !n.fileInfo.IsDir() {
+		return nil, 0, syscall.ENOTDIR
+	}
+
+	handle := &dirStreamHandle{
+		creator: func(ctx context.Context) (fs.DirStream, syscall.Errno) {
+			return n.Readdir(ctx)
+		},
+	}
+
+	return handle, 0, 0
 }
 
 func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {

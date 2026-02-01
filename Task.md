@@ -49,12 +49,12 @@
 - [x] `NodeAccess`（楽観的許可 or 明示 ENOTSUP）
 - [x] `NodeStatfs`（安定した疑似値を返す）
 - [x] `NodeOpendir`（最低限の整合）
-- [ ] `NodeOpendirHandle`（必要なら追加）
+- [x] `NodeOpendirHandle`（必要なら追加）
 - [x] `NodeOnForget`（inodeキャッシュ整理）
 
 ### P1-2: メタデータ挙動の明確化
-- [ ] `Setattr` の atime/mtime 更新の一貫性
-- [ ] 失敗コードの整理（EISDIR/ENOTSUP など）
+- [x] `Setattr` の atime/mtime 更新の一貫性
+- [x] 失敗コードの整理（EISDIR/ENOTSUP など）
 
 **完了条件**
 - `scripts/fuse_test.sh` が通る。

@@ -14,7 +14,7 @@ A FUSE-based file system to interact with Databricks workspace files and directo
 - [ ] Cache files for faster access. (in progress)
 
 Notes:
-- `Setattr` currently supports size changes (truncate) and mtime updates. Permissions/ownership changes are ignored.
+- `Setattr` currently supports size changes (truncate) and mtime updates. atime-only updates return ENOTSUP. chmod/chown also return ENOTSUP.
 - Vim saves are verified in the test suite.
 
 ## TODO: Improve wsfs toward an ideal FUSE filesystem
