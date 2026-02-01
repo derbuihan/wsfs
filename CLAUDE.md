@@ -39,26 +39,44 @@ umount /mnt/wsfs          # macOS
 
 ### Testing
 
-Tests are designed to run in Docker for consistency. Set `DATABRICKS_HOST` and `DATABRICKS_TOKEN` in `.env` file.
+#### Go Unit Tests (no .env required)
+
+Go unit tests use mocks and can run anywhere, including GitHub Actions.
 
 ```bash
 # Run all Go unit tests
 go test ./...
 
+# Run with race detector
+go test -race ./...
+
 # Run specific package tests
 go test ./internal/filecache/...
+go test ./internal/fuse/...
+go test ./internal/databricks/...
+```
 
-# Run basic FUSE operation tests (Docker)
-docker compose run --rm --build wsfs-test
+#### Integration Tests (requires .env)
 
-# Run comprehensive cache tests (Docker)
-docker compose run --rm --build wsfs-cache-test
+Set `DATABRICKS_HOST` and `DATABRICKS_TOKEN` in `.env` file.
 
-# Run specific test script directly (requires mounted filesystem)
-./scripts/fuse_test.sh /mnt/wsfs
-./scripts/cache_test.sh /mnt/wsfs
-./scripts/large_file_test.sh /mnt/wsfs
-./scripts/databricks_cli_verification_test.sh /mnt/wsfs
+```bash
+# Linux: Run all integration tests
+./scripts/tests/run_tests.sh /mnt/wsfs
+
+# Linux: Run specific test suite
+./scripts/tests/run_tests.sh /mnt/wsfs --fuse-only
+./scripts/tests/run_tests.sh /mnt/wsfs --cache-only
+
+# Mac: Run via Docker (recommended)
+./scripts/docker_test.sh
+
+# Mac: Run with rebuild
+./scripts/docker_test.sh --build
+
+# Mac: Run specific test suite
+./scripts/docker_test.sh --fuse-only
+./scripts/docker_test.sh --cache-only
 ```
 
 ## Architecture Overview
@@ -155,13 +173,29 @@ Testing is enabled through thin interfaces:
 - `internal/cache/cache.go` - In-memory metadata cache with 60s TTL
 
 ### Testing
-- `internal/filecache/disk_cache_test.go` - Go unit tests (13 tests, 100% coverage)
-- `scripts/fuse_test.sh` - Basic FUSE operations (10+ categories)
-- `scripts/cache_test.sh` - Cache hit/miss/invalidation (9 categories)
-- `scripts/cache_sync_test.sh` - Remote modification detection (4 categories)
-- `scripts/databricks_cli_verification_test.sh` - Databricks CLI comparison (8 scenarios)
-- `scripts/docker_cache_test.sh` - Integration tests (4 configurations)
-- `scripts/large_file_test.sh` - Large file handling (10MB/50MB/100MB)
+
+#### Go Unit Tests (no .env dependency)
+- `internal/filecache/disk_cache_test.go` - Disk cache tests (13 tests)
+- `internal/fuse/node_test.go` - FUSE node tests (24 tests)
+- `internal/databricks/client_test.go` - Databricks client tests (8 tests)
+- `internal/metacache/cache_test.go` - Metadata cache tests
+
+#### Integration Tests (requires .env + mounted filesystem)
+- `scripts/tests/fuse_test.sh` - Unified FUSE operations (9 sections)
+  - Basic file operations, Directory operations, File modification
+  - Attributes, Edge cases, Error handling, Editor compatibility
+  - Large files & concurrency, Databricks CLI verification
+- `scripts/tests/cache_test.sh` - Unified cache tests (5 sections)
+  - Basic cache operations, Cache invalidation, Remote sync
+  - TTL/LRU behavior, Cache configuration tests
+- `scripts/tests/run_tests.sh` - Test runner for Linux
+- `scripts/docker_test.sh` - Docker-based test runner for Mac
+
+#### Test Helpers
+- `scripts/tests/lib/test_helpers.sh` - Cross-platform (Linux/Mac) test utilities
+
+#### Deprecated (reference only)
+- `scripts/deprecated/` - Old test scripts preserved for reference
 
 ## Important Implementation Details
 
@@ -228,6 +262,60 @@ Each interface method must return `syscall.Errno` (0 for success) and handle con
 - **Data cache**: Edit `internal/filecache/disk_cache.go` (LRU + TTL with disk storage)
 - **Cache invalidation**: Search for `cache.Invalidate()` and `diskCache.Delete()` calls
 - Always test with both `--cache=true` and `--cache=false`
+
+## Code Change Guidelines
+
+### Required: Run Tests After Significant Changes
+
+After making significant code changes, you MUST run both unit tests and integration tests to verify no regressions:
+
+```bash
+# Step 1: Run Go unit tests
+go test ./...
+
+# Step 2: Run Docker integration tests (includes FUSE and cache tests)
+./scripts/docker_test.sh
+```
+
+**What counts as "significant changes":**
+- Modifying any file in `internal/fuse/`, `internal/databricks/`, `internal/filecache/`, or `internal/metacache/`
+- Adding/modifying FUSE operations
+- Changing API call logic or fallback behavior
+- Modifying cache logic (hit/miss, invalidation, TTL, LRU)
+- Changing file read/write paths
+
+### Required: Consider Test Updates
+
+When modifying code, always consider what tests need to be added or updated:
+
+1. **For new functions/methods:**
+   - Add Go unit test in the corresponding `*_test.go` file
+   - Use mocks (`FakeWorkspaceAPI`, `MockAPIClient`) to avoid .env dependency
+
+2. **For behavior changes:**
+   - Update existing tests to reflect new behavior
+   - Add edge case tests if the change introduces new conditions
+
+3. **For bug fixes:**
+   - Add a regression test that would have caught the bug
+   - Verify the fix doesn't break existing functionality
+
+4. **For FUSE operations:**
+   - Add test case to `scripts/tests/fuse_test.sh` if it's a new operation
+   - Test both success and error cases (ENOENT, EISDIR, ENOTDIR, etc.)
+
+5. **For cache-related changes:**
+   - Add test case to `scripts/tests/cache_test.sh`
+   - Test cache hit, miss, invalidation, and TTL behavior
+
+### Test Categories Reference
+
+| Change Area | Unit Test File | Integration Test |
+|-------------|----------------|------------------|
+| FUSE operations | `internal/fuse/node_test.go` | `scripts/tests/fuse_test.sh` |
+| Databricks API | `internal/databricks/client_test.go` | `scripts/tests/fuse_test.sh` |
+| Disk cache | `internal/filecache/disk_cache_test.go` | `scripts/tests/cache_test.sh` |
+| Metadata cache | `internal/metacache/cache_test.go` | `scripts/tests/cache_test.sh` |
 
 ## Known Limitations
 

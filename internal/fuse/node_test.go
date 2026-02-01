@@ -443,3 +443,221 @@ func TestWSNodeGetattrDirectory(t *testing.T) {
 		t.Error("Directory should have directory flag set")
 	}
 }
+
+// TestWSNodeAccess tests that Access always returns 0 (allow all)
+func TestWSNodeAccess(t *testing.T) {
+	n := &WSNode{
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+		}},
+	}
+
+	// Test various access masks
+	masks := []uint32{0, 1, 2, 4, 7}
+	for _, mask := range masks {
+		errno := n.Access(context.Background(), mask)
+		if errno != 0 {
+			t.Errorf("Access(mask=%d) returned errno %d, expected 0", mask, errno)
+		}
+	}
+}
+
+// TestWSNodeStatfs tests that Statfs returns expected values
+func TestWSNodeStatfs(t *testing.T) {
+	n := &WSNode{
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeDirectory,
+			Path:       "/",
+		}},
+	}
+
+	out := &fuse.StatfsOut{}
+	errno := n.Statfs(context.Background(), out)
+	if errno != 0 {
+		t.Fatalf("Statfs returned errno: %d", errno)
+	}
+
+	if out.Bsize != 4096 {
+		t.Errorf("Expected Bsize 4096, got %d", out.Bsize)
+	}
+	if out.NameLen != 255 {
+		t.Errorf("Expected NameLen 255, got %d", out.NameLen)
+	}
+	if out.Blocks == 0 {
+		t.Error("Expected non-zero Blocks")
+	}
+}
+
+// TestWSNodeOpenTrunc tests Open with O_TRUNC flag
+func TestWSNodeOpenTrunc(t *testing.T) {
+	n := &WSNode{
+		wfClient: &databricks.FakeWorkspaceAPI{},
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+			Size:       100,
+		}},
+		buf: fileBuffer{Data: []byte("existing content")},
+	}
+
+	_, _, errno := n.Open(context.Background(), syscall.O_TRUNC|syscall.O_WRONLY)
+	if errno != 0 {
+		t.Fatalf("Open with O_TRUNC failed with errno: %d", errno)
+	}
+
+	// Buffer should be empty after O_TRUNC
+	if len(n.buf.Data) != 0 {
+		t.Errorf("Expected empty buffer after O_TRUNC, got %d bytes", len(n.buf.Data))
+	}
+	if n.fileInfo.Size() != 0 {
+		t.Errorf("Expected size 0 after O_TRUNC, got %d", n.fileInfo.Size())
+	}
+	if !n.buf.Dirty {
+		t.Error("Expected buffer to be dirty after O_TRUNC")
+	}
+}
+
+// TestWSNodeOpenDirectory tests that Open on directory returns EISDIR
+func TestWSNodeOpenDirectory(t *testing.T) {
+	n := &WSNode{
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeDirectory,
+			Path:       "/mydir",
+		}},
+	}
+
+	_, _, errno := n.Open(context.Background(), 0)
+	if errno != syscall.EISDIR {
+		t.Errorf("Expected EISDIR, got errno: %d", errno)
+	}
+}
+
+// TestWSNodeReaddir tests directory listing
+func TestWSNodeReaddir(t *testing.T) {
+	entries := []fs.DirEntry{
+		databricks.WSDirEntry{WSFileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			Path:       "/test/file1.txt",
+			ObjectType: workspace.ObjectTypeFile,
+		}}},
+		databricks.WSDirEntry{WSFileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			Path:       "/test/subdir",
+			ObjectType: workspace.ObjectTypeDirectory,
+		}}},
+	}
+
+	api := &databricks.FakeWorkspaceAPI{
+		ReadDirFunc: func(ctx context.Context, dirPath string) ([]fs.DirEntry, error) {
+			return entries, nil
+		},
+	}
+
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeDirectory,
+			Path:       "/test",
+		}},
+	}
+
+	stream, errno := n.Readdir(context.Background())
+	if errno != 0 {
+		t.Fatalf("Readdir failed with errno: %d", errno)
+	}
+	if stream == nil {
+		t.Fatal("Expected non-nil stream")
+	}
+}
+
+// TestWSNodeReaddirNotDir tests that Readdir on file returns ENOTDIR
+func TestWSNodeReaddirNotDir(t *testing.T) {
+	n := &WSNode{
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+		}},
+	}
+
+	_, errno := n.Readdir(context.Background())
+	if errno != syscall.ENOTDIR {
+		t.Errorf("Expected ENOTDIR, got errno: %d", errno)
+	}
+}
+
+// TestWSNodeUnlinkDirectory tests that Unlink on directory returns EISDIR
+func TestWSNodeUnlinkDirectory(t *testing.T) {
+	api := &databricks.FakeWorkspaceAPI{
+		StatFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			return databricks.NewTestFileInfo("/dir/subdir", 0, true), nil
+		},
+	}
+
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeDirectory,
+			Path:       "/dir",
+		}},
+	}
+
+	errno := n.Unlink(context.Background(), "subdir")
+	if errno != syscall.EISDIR {
+		t.Errorf("Expected EISDIR when unlinking directory, got errno: %d", errno)
+	}
+}
+
+// TestWSNodeRmdirFile tests that Rmdir on file returns ENOTDIR
+func TestWSNodeRmdirFile(t *testing.T) {
+	api := &databricks.FakeWorkspaceAPI{
+		StatFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			return databricks.NewTestFileInfo("/dir/file.txt", 100, false), nil
+		},
+	}
+
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeDirectory,
+			Path:       "/dir",
+		}},
+	}
+
+	errno := n.Rmdir(context.Background(), "file.txt")
+	if errno != syscall.ENOTDIR {
+		t.Errorf("Expected ENOTDIR when rmdir on file, got errno: %d", errno)
+	}
+}
+
+// TestWSNodeOnForgetClean tests that OnForget clears clean buffer
+func TestWSNodeOnForgetClean(t *testing.T) {
+	n := &WSNode{
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+		}},
+		buf: fileBuffer{Data: []byte("test data"), Dirty: false},
+	}
+
+	n.OnForget()
+
+	if n.buf.Data != nil {
+		t.Error("Expected buffer to be cleared on forget for clean buffer")
+	}
+}
+
+// TestWSNodeOnForgetDirty tests that OnForget preserves dirty buffer
+func TestWSNodeOnForgetDirty(t *testing.T) {
+	n := &WSNode{
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+		}},
+		buf: fileBuffer{Data: []byte("dirty data"), Dirty: true},
+	}
+
+	n.OnForget()
+
+	if n.buf.Data == nil {
+		t.Error("Expected dirty buffer to be preserved on forget")
+	}
+}

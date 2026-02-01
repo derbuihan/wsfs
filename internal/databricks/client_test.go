@@ -631,6 +631,179 @@ func TestInMemoryFileSystem(t *testing.T) {
 	}
 }
 
+// TestDelete verifies that Delete calls the workspace client and invalidates cache
+func TestDelete(t *testing.T) {
+	deleteCalled := false
+	var deletedPath string
+	var deleteRecursive bool
+
+	mockWorkspace := &MockWorkspaceClient{
+		DeleteFunc: func(ctx context.Context, request workspace.Delete) error {
+			deleteCalled = true
+			deletedPath = request.Path
+			deleteRecursive = request.Recursive
+			return nil
+		},
+	}
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info") {
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test.txt",
+						ObjectType: workspace.ObjectTypeFile,
+						Size:       100,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				}
+				return nil
+			}
+			return fmt.Errorf("unexpected path: %s", path)
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, metacache.NewCache(10*time.Second))
+
+	// Prime the cache
+	_, err := client.Stat(context.Background(), "/test.txt")
+	if err != nil {
+		t.Fatalf("Stat failed: %v", err)
+	}
+
+	// Verify cache hit
+	_, found := client.cache.Get("/test.txt")
+	if !found {
+		t.Error("Expected cache entry before delete")
+	}
+
+	// Delete the file
+	err = client.Delete(context.Background(), "/test.txt", false)
+	if err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+
+	if !deleteCalled {
+		t.Error("Expected Delete to be called on workspace client")
+	}
+	if deletedPath != "/test.txt" {
+		t.Errorf("Expected path '/test.txt', got %q", deletedPath)
+	}
+	if deleteRecursive {
+		t.Error("Expected recursive to be false")
+	}
+
+	// Verify cache was invalidated
+	_, found = client.cache.Get("/test.txt")
+	if found {
+		t.Error("Expected cache entry to be invalidated after delete")
+	}
+}
+
+// TestMkdir verifies that Mkdir calls the workspace client and invalidates cache
+func TestMkdir(t *testing.T) {
+	mkdirCalled := false
+	var createdPath string
+
+	mockWorkspace := &MockWorkspaceClient{
+		MkdirsFunc: func(ctx context.Context, request workspace.Mkdirs) error {
+			mkdirCalled = true
+			createdPath = request.Path
+			return nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, &MockAPIClient{}, metacache.NewCache(10*time.Second))
+
+	err := client.Mkdir(context.Background(), "/newdir")
+	if err != nil {
+		t.Fatalf("Mkdir failed: %v", err)
+	}
+
+	if !mkdirCalled {
+		t.Error("Expected Mkdirs to be called on workspace client")
+	}
+	if createdPath != "/newdir" {
+		t.Errorf("Expected path '/newdir', got %q", createdPath)
+	}
+}
+
+// TestRename verifies that Rename invalidates cache for both source and destination
+func TestRename(t *testing.T) {
+	renameCalled := false
+	var sourcePath, destPath string
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info") {
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/old.txt",
+						ObjectType: workspace.ObjectTypeFile,
+						Size:       100,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				}
+				return nil
+			}
+			if strings.Contains(path, "rename") {
+				renameCalled = true
+				reqMap := request.(map[string]any)
+				sourcePath = reqMap["source_path"].(string)
+				destPath = reqMap["destination_path"].(string)
+				return nil
+			}
+			return fmt.Errorf("unexpected path: %s", path)
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, metacache.NewCache(10*time.Second))
+
+	// Prime cache for source file
+	_, err := client.Stat(context.Background(), "/old.txt")
+	if err != nil {
+		t.Fatalf("Stat failed: %v", err)
+	}
+
+	// Verify cache hit
+	_, found := client.cache.Get("/old.txt")
+	if !found {
+		t.Error("Expected cache entry before rename")
+	}
+
+	// Rename the file
+	err = client.Rename(context.Background(), "/old.txt", "/new.txt")
+	if err != nil {
+		t.Fatalf("Rename failed: %v", err)
+	}
+
+	if !renameCalled {
+		t.Error("Expected rename API to be called")
+	}
+	if sourcePath != "/old.txt" {
+		t.Errorf("Expected source path '/old.txt', got %q", sourcePath)
+	}
+	if destPath != "/new.txt" {
+		t.Errorf("Expected dest path '/new.txt', got %q", destPath)
+	}
+
+	// Verify both old and new paths are invalidated
+	_, found = client.cache.Get("/old.txt")
+	if found {
+		t.Error("Expected old path cache entry to be invalidated")
+	}
+	_, found = client.cache.Get("/new.txt")
+	if found {
+		t.Error("Expected new path cache entry to be invalidated")
+	}
+}
+
 // Benchmark tests
 
 func BenchmarkStatWithCache(b *testing.B) {
