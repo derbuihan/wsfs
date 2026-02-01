@@ -17,6 +17,16 @@ Notes:
 - `Setattr` currently supports size changes (truncate) and mtime updates. atime-only updates return ENOTSUP. chmod/chown also return ENOTSUP.
 - Vim saves are verified in the test suite.
 
+## Current behavior & limitations
+
+- Permissions are not enforced; `Access` currently allows all callers.
+- `Statfs` returns synthetic but stable values.
+- `Open` with write/truncate uses direct I/O; reads use the in-memory buffer after first fetch.
+- `Flush/Fsync/Release` write back dirty buffers; `Release` also drops the in-memory buffer.
+- atime-only updates are ENOTSUP; chmod/chown are ENOTSUP.
+
+Behavior details: see `docs/behavior.md`.
+
 ## TODO: Improve wsfs toward an ideal FUSE filesystem
 
 These are the most important gaps discovered so far (see `docs/databricks-api-survey.md` for API details).
@@ -27,16 +37,12 @@ These are the most important gaps discovered so far (see `docs/databricks-api-su
 - Implement smarter caching (read cache + write-back with consistency/eviction).
 
 ### Semantics & compatibility
-- Implement `Access` (permissions) using Databricks permissions API or consistent optimistic behavior.
-- Add `Statfs` with synthetic but stable filesystem stats.
 - Decide on xattr behavior (`Get/Set/List/Remove` → `ENOTSUP` or emulation).
 - Decide on symlink/hardlink/device support (`Readlink`, `Symlink`, `Link`, `Mknod` likely `ENOTSUP`).
 - Add advisory locks (`Getlk/Setlk/Setlkw`) or return `ENOTSUP`.
 - Add `Lseek`/sparse support or return `ENOTSUP`.
 
 ### Lifecycle & correctness
-- Implement `Release` for local cleanup; ensure buffers are flushed and freed.
-- Add directory open handlers (`Opendir`/`OpendirHandle`) for sanity checks.
 - `Statx` mapping to `workspace-files/object-info` fields.
 
 ### API discovery gaps

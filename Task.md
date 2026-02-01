@@ -30,12 +30,12 @@
 ## Phase 0: 仕様・挙動の確定（実装の安全性）
 
 ### P0-1: 仕様整理
-- [ ] README / docs の「現在の挙動」と「未対応」を明確化。
-- [ ] `Setattr` / `Open` / `Flush` の期待動作を明文化。
+- [x] README / docs の「現在の挙動」と「未対応」を明確化。
+- [x] `Setattr` / `Open` / `Flush` の期待動作を明文化。
 
 ### P0-2: API 実挙動の検証
-- [ ] `workspace-files/new-files` / `write-files` / signed URL upload の検証手順を作成。
-- [ ] 失敗時のフォールバック経路を明確化（Export/import-file）。
+- [x] `workspace-files/new-files` / `write-files` / signed URL upload の検証手順を作成。
+- [x] 失敗時のフォールバック経路を明確化（Export/import-file）。
 
 **完了条件**
 - `docs/` に検証結果が残っている。
