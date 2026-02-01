@@ -12,6 +12,12 @@ Key entry points:
 - `node.go`: FUSE node implementation.
 - `scripts/fuse_test.sh`: Filesystem integration tests.
 
+## Current implementation notes
+
+- `Setattr` supports size changes (truncate) and mtime updates; mode/uid/gid are explicitly unsupported (return ENOTSUP). atime-only updates are unsupported; combined mtime+atime (e.g., `touch`) works.
+- Stable inode IDs are derived from Databricks `ObjectId`/`ResourceId`/`Path` to avoid editor save errors (e.g., Vim E949).
+- Vim save paths (default/backup/swap) are validated in `scripts/fuse_test.sh`.
+
 ## Environment
 
 Required environment variables (do not commit secrets):
@@ -47,6 +53,9 @@ Uses `docker-compose.yml`, mounts `/dev/fuse`, and runs the existing test script
 ```bash
 docker compose run --rm --build wsfs-test
 ```
+
+Notes:
+- Development is commonly done on macOS using Docker; the test image includes Vim to exercise editor save behavior.
 
 ### Linux (direct)
 

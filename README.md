@@ -17,6 +17,32 @@ Notes:
 - `Setattr` currently supports size changes (truncate) and mtime updates. Permissions/ownership changes are ignored.
 - Vim saves are verified in the test suite.
 
+## TODO: Improve wsfs toward an ideal FUSE filesystem
+
+These are the most important gaps discovered so far (see `docs/databricks-api-survey.md` for API details).
+
+### Data path & performance
+- Support large file uploads via `workspace-files/new-files` + signed URL upload (currently returns SAS URL; upload step fails with 403 and needs correct method/headers/permissions).
+- Determine correct request schema for `workspace-files/write-files` (current attempts return BAD_REQUEST).
+- Implement smarter caching (read cache + write-back with consistency/eviction).
+
+### Semantics & compatibility
+- Implement `Access` (permissions) using Databricks permissions API or consistent optimistic behavior.
+- Add `Statfs` with synthetic but stable filesystem stats.
+- Decide on xattr behavior (`Get/Set/List/Remove` → `ENOTSUP` or emulation).
+- Decide on symlink/hardlink/device support (`Readlink`, `Symlink`, `Link`, `Mknod` likely `ENOTSUP`).
+- Add advisory locks (`Getlk/Setlk/Setlkw`) or return `ENOTSUP`.
+- Add `Lseek`/sparse support or return `ENOTSUP`.
+
+### Lifecycle & correctness
+- Implement `Release` for local cleanup; ensure buffers are flushed and freed.
+- Add directory open handlers (`Opendir`/`OpendirHandle`) for sanity checks.
+- `Statx` mapping to `workspace-files/object-info` fields.
+
+### API discovery gaps
+- Figure out required params for `workspace-files/get-safe-flags`.
+- Validate `notebooks/sync-notebooks-to-wsfs` side effects and response contract.
+
 ## Distribution & Development Experience
 
 - [ ] Automate release builds using GitHub Actions.

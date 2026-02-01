@@ -48,6 +48,10 @@ stat_mtime() {
   stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
 }
 
+stat_atime() {
+  stat -c %X "$1" 2>/dev/null || stat -f %a "$1" 2>/dev/null
+}
+
 # Setup
 
 MOUNT_POINT=$1
@@ -312,6 +316,33 @@ sleep 1
 run_cmd 'touch touch.txt'
 AFTER=$(stat_mtime touch.txt)
 assert "[ $AFTER -gt $BEFORE ]" "touch updates mtime"
+
+# chmod/chown/atime behavior (expected to fail unless implemented)
+run_cmd 'printf "perm" > perm.txt'
+set +e
+chmod 600 perm.txt
+CHMOD_RC=$?
+set -e
+assert "[ $CHMOD_RC -ne 0 ]" "chmod is not supported"
+
+set +e
+chown 9999:9999 perm.txt
+CHOWN_RC=$?
+set -e
+assert "[ $CHOWN_RC -ne 0 ]" "chown is not supported"
+
+ATIME_BEFORE=$(stat_atime perm.txt)
+sleep 1
+set +e
+touch -a perm.txt
+TOUCH_A_RC=$?
+set -e
+if [ $TOUCH_A_RC -eq 0 ]; then
+  ATIME_AFTER=$(stat_atime perm.txt)
+  assert "[ $ATIME_AFTER -gt $ATIME_BEFORE ]" "touch -a updates atime"
+else
+  assert "[ $TOUCH_A_RC -ne 0 ]" "touch -a is not supported"
+fi
 
 # ========================================
 # All Tests Passed

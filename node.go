@@ -167,10 +167,23 @@ func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttr
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	if _, ok := in.GetMode(); ok {
+		return syscall.ENOTSUP
+	}
+	if _, ok := in.GetUID(); ok {
+		return syscall.ENOTSUP
+	}
+	if _, ok := in.GetGID(); ok {
+		return syscall.ENOTSUP
+	}
 	var mtime *time.Time
 	sizeChanged := false
+	atimeRequested := false
 	if t, ok := in.GetMTime(); ok {
 		mtime = &t
+	}
+	if _, ok := in.GetATime(); ok {
+		atimeRequested = true
 	}
 
 	if size, ok := in.GetSize(); ok {
@@ -188,6 +201,10 @@ func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttr
 			now := time.Now()
 			mtime = &now
 		}
+	}
+
+	if atimeRequested && mtime == nil && !sizeChanged {
+		return syscall.ENOTSUP
 	}
 
 	if mtime != nil {
