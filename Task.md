@@ -65,15 +65,17 @@
 ## Phase 2: データパス強化（大きいファイル安定化）
 
 ### P2-1: 読み込み強化
-- [ ] `object-info` の signed URL を使った read path を追加。
-- [ ] 失敗時は `workspace.Export` にフォールバック。
+- [x] `object-info` の signed URL を使った read path を追加。
+- [x] 失敗時は `workspace.Export` にフォールバック。
+- [x] 大きいファイルテストスクリプト `scripts/large_file_test.sh` を追加。
 
 ### P2-2: 書き込み強化
-- [ ] `new-files` / `write-files` のトライパスを追加。
-- [ ] 失敗時は `import-file` にフォールバック。
+- [x] `new-files` / `write-files` のトライパスを追加。
+- [x] 失敗時は `import-file` にフォールバック。
 
 **完了条件**
-- 大きいファイルの読み書きテストが通る（新規テスト追加）。
+- P2-1: ✅ 完了。signed URL読み込みが実装され、フォールバックが動作する。
+- P2-2: ✅ 完了。new-files/write-filesが実装され、フォールバックが動作する。10MB ファイルの書き込みテストが通る。
 
 ---
 

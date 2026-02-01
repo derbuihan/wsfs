@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/url"
@@ -21,7 +23,8 @@ import (
 
 type WSFileInfo struct {
 	workspace.ObjectInfo
-	SignedURL string
+	SignedURL        string
+	SignedURLHeaders map[string]string
 }
 
 func (info WSFileInfo) Name() string {
@@ -72,7 +75,8 @@ func (entry WSDirEntry) Info() (fs.FileInfo, error) {
 type wsfsObjectInfo struct {
 	ObjectInfo workspace.ObjectInfo `json:"object_info"`
 	SignedURL  *struct {
-		URL string `json:"url"`
+		URL     string            `json:"url"`
+		Headers map[string]string `json:"headers,omitempty"`
 	} `json:"signed_url,omitempty"`
 }
 
@@ -142,6 +146,7 @@ func (c *WorkspaceFilesClient) Stat(ctx context.Context, filePath string) (fs.Fi
 	apiInfo := WSFileInfo{ObjectInfo: resp.WsfsObjectInfo.ObjectInfo}
 	if resp.WsfsObjectInfo.SignedURL != nil {
 		apiInfo.SignedURL = resp.WsfsObjectInfo.SignedURL.URL
+		apiInfo.SignedURLHeaders = resp.WsfsObjectInfo.SignedURL.Headers
 	}
 	c.cache.Set(filePath, apiInfo)
 	return apiInfo, nil
@@ -166,6 +171,7 @@ func (c *WorkspaceFilesClient) ReadDir(ctx context.Context, dirPath string) ([]f
 		}
 		if obj.SignedURL != nil {
 			info.SignedURL = obj.SignedURL.URL
+			info.SignedURLHeaders = obj.SignedURL.Headers
 		}
 		entries[i] = WSDirEntry{info}
 		c.cache.Set(info.Path, info)
@@ -178,7 +184,51 @@ func (c *WorkspaceFilesClient) ReadDir(ctx context.Context, dirPath string) ([]f
 	return entries, nil
 }
 
+func (c *WorkspaceFilesClient) readViaSignedURL(ctx context.Context, url string, headers map[string]string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set signed URL headers
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("signed URL GET failed with status: %d", resp.StatusCode)
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
 func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]byte, error) {
+	// 1. Get signed URL from object-info (may already be cached in Stat())
+	info, err := c.Stat(ctx, filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	wsInfo := info.(WSFileInfo)
+
+	// 2. Try to use signed URL if available
+	if wsInfo.SignedURL != "" {
+		data, err := c.readViaSignedURL(ctx, wsInfo.SignedURL, wsInfo.SignedURLHeaders)
+		if err == nil {
+			debugf("Read via signed URL succeeded for path: %s", filePath)
+			return data, nil
+		}
+		debugf("Read via signed URL failed for path: %s, falling back to Export: %v", filePath, err)
+	}
+
+	// 3. Fallback: workspace.Export
 	resp, err := c.workspaceClient.Export(ctx, workspace.ExportRequest{
 		Path:   filePath,
 		Format: workspace.ExportFormatSource,
@@ -189,9 +239,91 @@ func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]
 	return base64.StdEncoding.DecodeString(resp.Content)
 }
 
+func (c *WorkspaceFilesClient) writeViaNewFiles(ctx context.Context, filepath string, data []byte) error {
+	// 1. Call new-files API to get signed URL
+	contentB64 := base64.StdEncoding.EncodeToString(data)
+	reqBody := map[string]any{
+		"path":    filepath,
+		"content": contentB64,
+	}
+
+	var resp struct {
+		SignedURLs []struct {
+			URL     string            `json:"url"`
+			Headers map[string]string `json:"headers"`
+		} `json:"signed_urls"`
+	}
+
+	err := c.apiClient.Do(ctx, http.MethodPost, "/api/2.0/workspace-files/new-files", nil, nil, reqBody, &resp)
+	if err != nil {
+		return err
+	}
+
+	if len(resp.SignedURLs) == 0 {
+		return fmt.Errorf("no signed URL returned")
+	}
+
+	// 2. Upload to signed URL with PUT
+	signedURL := resp.SignedURLs[0]
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, signedURL.URL, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+
+	for k, v := range signedURL.Headers {
+		req.Header.Set(k, v)
+	}
+
+	client := &http.Client{Timeout: 5 * time.Minute}
+	putResp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer putResp.Body.Close()
+
+	if putResp.StatusCode != http.StatusOK && putResp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(putResp.Body)
+		return fmt.Errorf("signed URL PUT failed with status %d: %s", putResp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+func (c *WorkspaceFilesClient) writeViaWriteFiles(ctx context.Context, filepath string, data []byte) error {
+	contentB64 := base64.StdEncoding.EncodeToString(data)
+	reqBody := map[string]any{
+		"files": []map[string]any{
+			{
+				"path":      filepath,
+				"content":   contentB64,
+				"overwrite": true,
+			},
+		},
+	}
+
+	return c.apiClient.Do(ctx, http.MethodPost, "/api/2.0/workspace-files/write-files", nil, nil, reqBody, nil)
+}
+
 func (c *WorkspaceFilesClient) Write(ctx context.Context, filepath string, data []byte) error {
 	c.cache.Invalidate(filepath)
 
+	// 1. Try new-files (experimental)
+	err := c.writeViaNewFiles(ctx, filepath, data)
+	if err == nil {
+		debugf("Write via new-files succeeded for path: %s", filepath)
+		return nil
+	}
+	debugf("Write via new-files failed for path: %s, trying write-files: %v", filepath, err)
+
+	// 2. Try write-files (experimental)
+	err = c.writeViaWriteFiles(ctx, filepath, data)
+	if err == nil {
+		debugf("Write via write-files succeeded for path: %s", filepath)
+		return nil
+	}
+	debugf("Write via write-files failed for path: %s, falling back to import-file: %v", filepath, err)
+
+	// 3. Fallback: import-file
 	urlPath := fmt.Sprintf(
 		"/api/2.0/workspace-files/import-file/%s?overwrite=true",
 		url.PathEscape(strings.TrimLeft(filepath, "/")),

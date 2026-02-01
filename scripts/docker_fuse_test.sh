@@ -54,3 +54,9 @@ if ! is_mounted; then
 fi
 
 bash "$ROOT_DIR/scripts/fuse_test.sh" "$MOUNT_DIR"
+
+echo ""
+echo "========================================"
+echo "Running Large File Tests"
+echo "========================================"
+bash "$ROOT_DIR/scripts/large_file_test.sh" "$MOUNT_DIR"
