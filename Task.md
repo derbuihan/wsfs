@@ -45,11 +45,12 @@
 ## Phase 1: 互換性強化（go-fuse 未実装の優先対応）
 
 ### P1-1: 影響の大きいインターフェースの実装
-- [ ] `NodeRelease`（バッファ解放 + flush 保障）
-- [ ] `NodeAccess`（楽観的許可 or 明示 ENOTSUP）
-- [ ] `NodeStatfs`（安定した疑似値を返す）
-- [ ] `NodeOpendir`/`OpendirHandle`（最低限の整合）
-- [ ] `NodeOnForget`（inodeキャッシュ整理）
+- [x] `NodeRelease`（バッファ解放 + flush 保障）
+- [x] `NodeAccess`（楽観的許可 or 明示 ENOTSUP）
+- [x] `NodeStatfs`（安定した疑似値を返す）
+- [x] `NodeOpendir`（最低限の整合）
+- [ ] `NodeOpendirHandle`（必要なら追加）
+- [x] `NodeOnForget`（inodeキャッシュ整理）
 
 ### P1-2: メタデータ挙動の明確化
 - [ ] `Setattr` の atime/mtime 更新の一貫性

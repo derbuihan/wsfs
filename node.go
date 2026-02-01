@@ -25,15 +25,20 @@ var _ = (fs.NodeSetattrer)((*WSNode)(nil))
 var _ = (fs.NodeReaddirer)((*WSNode)(nil))
 var _ = (fs.NodeLookuper)((*WSNode)(nil))
 var _ = (fs.NodeOpener)((*WSNode)(nil))
+var _ = (fs.NodeOpendirer)((*WSNode)(nil))
 var _ = (fs.NodeReader)((*WSNode)(nil))
 var _ = (fs.NodeWriter)((*WSNode)(nil))
 var _ = (fs.NodeFlusher)((*WSNode)(nil))
 var _ = (fs.NodeFsyncer)((*WSNode)(nil))
+var _ = (fs.NodeReleaser)((*WSNode)(nil))
 var _ = (fs.NodeCreater)((*WSNode)(nil))
 var _ = (fs.NodeUnlinker)((*WSNode)(nil))
 var _ = (fs.NodeMkdirer)((*WSNode)(nil))
 var _ = (fs.NodeRmdirer)((*WSNode)(nil))
 var _ = (fs.NodeRenamer)((*WSNode)(nil))
+var _ = (fs.NodeAccesser)((*WSNode)(nil))
+var _ = (fs.NodeStatfser)((*WSNode)(nil))
+var _ = (fs.NodeOnForgetter)((*WSNode)(nil))
 
 func (n *WSNode) Path() string {
 	return n.fileInfo.Path
@@ -155,6 +160,30 @@ func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 
 	n.fillAttr(ctx, &out.Attr)
 	out.SetTimeout(60)
+
+	return 0
+}
+
+func (n *WSNode) Access(ctx context.Context, mask uint32) syscall.Errno {
+	debugf("Access called on path: %s (mask: %d)", n.Path(), mask)
+	return 0
+}
+
+func (n *WSNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
+	debugf("Statfs called on path: %s", n.Path())
+
+	const blockSize = uint32(4096)
+	const totalBlocks = uint64(1 << 30)
+	const totalFiles = uint64(1 << 24)
+
+	out.Bsize = blockSize
+	out.Frsize = blockSize
+	out.Blocks = totalBlocks
+	out.Bfree = totalBlocks
+	out.Bavail = totalBlocks
+	out.Files = totalFiles
+	out.Ffree = totalFiles
+	out.NameLen = 255
 
 	return 0
 }
@@ -302,6 +331,16 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 	return nil, openFlags, 0
 }
 
+func (n *WSNode) Opendir(ctx context.Context) syscall.Errno {
+	debugf("Opendir called on path: %s", n.Path())
+
+	if !n.fileInfo.IsDir() {
+		return syscall.ENOTDIR
+	}
+
+	return 0
+}
+
 func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	debugf("Read called on path: %s, offset: %d, size: %d", n.Path(), off, len(dest))
 
@@ -372,6 +411,21 @@ func (n *WSNode) Fsync(ctx context.Context, fh fs.FileHandle, flags uint32) sysc
 	defer n.mu.Unlock()
 
 	return n.flushLocked(ctx)
+}
+
+func (n *WSNode) Release(ctx context.Context, fh fs.FileHandle) syscall.Errno {
+	debugf("Release called on path: %s", n.Path())
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	errno := n.flushLocked(ctx)
+	if errno == 0 {
+		n.buf.data = nil
+		n.buf.dirty = false
+	}
+
+	return errno
 }
 
 func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
@@ -497,6 +551,19 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 	}
 
 	return 0
+}
+
+func (n *WSNode) OnForget() {
+	debugf("OnForget called on path: %s", n.Path())
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.buf.dirty {
+		return
+	}
+	n.buf.data = nil
+	n.buf.dirty = false
 }
 
 func NewRootNode(wfClient WorkspaceFilesAPI, rootPath string) (*WSNode, error) {
