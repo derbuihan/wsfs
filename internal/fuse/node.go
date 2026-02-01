@@ -19,6 +19,31 @@ import (
 	"wsfs/internal/logging"
 )
 
+// File system constants
+const (
+	// Attribute and entry cache timeouts in seconds
+	attrTimeoutSec  = 60
+	entryTimeoutSec = 60
+
+	// File permissions
+	dirMode  = 0755
+	fileMode = 0644
+
+	// Block size for file attributes
+	blockSize   = 4096
+	blockFactor = 512 // for calculating number of blocks
+
+	// Statfs limits
+	maxNameLen = 255
+
+	// Default inode number when no ID is available
+	defaultIno = 1
+
+	// Nlink values
+	dirNlink  = 2
+	fileNlink = 1
+)
+
 // fileBuffer holds in-memory file data and dirty state.
 type fileBuffer struct {
 	Data  []byte
@@ -69,7 +94,7 @@ func stableIno(info databricks.WSFileInfo) uint64 {
 	if info.Path != "" {
 		return hashStringToIno(info.Path)
 	}
-	return 1
+	return defaultIno
 }
 
 func hashStringToIno(s string) uint64 {
@@ -77,7 +102,7 @@ func hashStringToIno(s string) uint64 {
 	_, _ = h.Write([]byte(s))
 	sum := h.Sum64()
 	if sum == 0 {
-		return 1
+		return defaultIno
 	}
 	return sum
 }
@@ -144,6 +169,7 @@ func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
 	logging.Debugf("Cache miss for %s, fetching from remote", remotePath)
 	data, err := n.wfClient.ReadAll(ctx, remotePath)
 	if err != nil {
+		logging.Debugf("Failed to read file %s: %v", remotePath, err)
 		return syscall.EIO
 	}
 	n.buf.Data = data
@@ -220,17 +246,17 @@ func (n *WSNode) fillAttr(ctx context.Context, out *fuse.Attr) {
 
 	// Set the attributes for the file or directory
 	if wsInfo.IsDir() {
-		out.Mode = syscall.S_IFDIR | 0755
-		out.Nlink = 2
+		out.Mode = syscall.S_IFDIR | dirMode
+		out.Nlink = dirNlink
 	} else {
-		out.Mode = syscall.S_IFREG | 0644
-		out.Nlink = 1
+		out.Mode = syscall.S_IFREG | fileMode
+		out.Nlink = fileNlink
 	}
 
 	// Block size
 	out.Size = uint64(wsInfo.Size())
-	out.Blksize = 4096
-	out.Blocks = (out.Size + 511) / 512
+	out.Blksize = blockSize
+	out.Blocks = (out.Size + blockFactor - 1) / blockFactor
 
 	// Timestamp
 	modTime := wsInfo.ModTime()
@@ -250,7 +276,7 @@ func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 	logging.Debugf("Getattr called on path: %s", n.Path())
 
 	n.fillAttr(ctx, &out.Attr)
-	out.SetTimeout(60)
+	out.SetTimeout(attrTimeoutSec)
 
 	return 0
 }
@@ -274,7 +300,7 @@ func (n *WSNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno 
 	out.Bavail = totalBlocks
 	out.Files = totalFiles
 	out.Ffree = totalFiles
-	out.NameLen = 255
+	out.NameLen = maxNameLen
 
 	return 0
 }
@@ -393,8 +419,8 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo}
 	childNode.fillAttr(ctx, &out.Attr)
 
-	out.SetEntryTimeout(60)
-	out.SetAttrTimeout(60)
+	out.SetEntryTimeout(entryTimeoutSec)
+	out.SetAttrTimeout(attrTimeoutSec)
 
 	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode), Ino: stableIno(wsInfo)})
 	return child, 0
@@ -596,8 +622,8 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo, buf: fileBuffer{Data: initialContent}}
 	childNode.fillAttr(ctx, &out.Attr)
 
-	out.SetEntryTimeout(60)
-	out.SetAttrTimeout(60)
+	out.SetEntryTimeout(entryTimeoutSec)
+	out.SetAttrTimeout(attrTimeoutSec)
 
 	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode), Ino: stableIno(wsInfo)})
 	return child, nil, fuse.FOPEN_KEEP_CACHE, 0
@@ -698,6 +724,7 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 
 	newParentNode, ok := newParent.EmbeddedInode().Operations().(*WSNode)
 	if !ok {
+		logging.Debugf("Rename: failed to get parent node for %s", newName)
 		return syscall.EIO
 	}
 
@@ -715,6 +742,7 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 
 	err = n.wfClient.Rename(ctx, oldPath, newPath)
 	if err != nil {
+		logging.Debugf("Failed to rename %s to %s: %v", oldPath, newPath, err)
 		return syscall.EIO
 	}
 
