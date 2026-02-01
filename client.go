@@ -225,6 +225,10 @@ func (c *WorkspaceFilesClient) Rename(ctx context.Context, source_path string, d
 
 // Helpers
 
+func (c *WorkspaceFilesClient) CacheSet(filePath string, info fs.FileInfo) {
+	c.cache.Set(filePath, info)
+}
+
 func (c *WorkspaceFilesClient) Exists(ctx context.Context, path string) (bool, error) {
 	_, err := c.Stat(ctx, path)
 	if err != nil {

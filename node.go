@@ -15,10 +15,9 @@ import (
 
 type WSNode struct {
 	fs.Inode
-	wfClient *WorkspaceFilesClient
+	wfClient WorkspaceFilesAPI
 	fileInfo WSFileInfo
-	data     []byte
-	dirty    bool
+	buf      fileBuffer
 	mu       sync.Mutex
 }
 
@@ -65,7 +64,7 @@ func hashStringToIno(s string) uint64 {
 }
 
 func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
-	if n.data != nil {
+	if n.buf.data != nil {
 		return 0
 	}
 	if n.fileInfo.IsDir() {
@@ -75,24 +74,24 @@ func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
 	if err != nil {
 		return syscall.EIO
 	}
-	n.data = data
+	n.buf.data = data
 	return 0
 }
 
 func (n *WSNode) truncateLocked(size uint64) {
-	if n.data == nil {
-		n.data = []byte{}
+	if n.buf.data == nil {
+		n.buf.data = []byte{}
 	}
-	cur := uint64(len(n.data))
+	cur := uint64(len(n.buf.data))
 	if cur > size {
-		n.data = n.data[:size]
+		n.buf.data = n.buf.data[:size]
 	} else if cur < size {
 		newData := make([]byte, size)
-		copy(newData, n.data)
-		n.data = newData
+		copy(newData, n.buf.data)
+		n.buf.data = newData
 	}
 	n.fileInfo.ObjectInfo.Size = int64(size)
-	n.dirty = true
+	n.buf.dirty = true
 }
 
 func (n *WSNode) markModifiedLocked(t time.Time) {
@@ -100,16 +99,16 @@ func (n *WSNode) markModifiedLocked(t time.Time) {
 }
 
 func (n *WSNode) flushLocked(ctx context.Context) syscall.Errno {
-	if !n.dirty || n.data == nil {
+	if !n.buf.dirty || n.buf.data == nil {
 		return 0
 	}
 
-	err := n.wfClient.Write(ctx, n.Path(), n.data)
+	err := n.wfClient.Write(ctx, n.Path(), n.buf.data)
 	if err != nil {
 		log.Printf("Error writting back on Flush: %v", err)
 		return syscall.EIO
 	}
-	n.dirty = false
+	n.buf.dirty = false
 
 	info, err := n.wfClient.Stat(ctx, n.Path())
 	if err != nil {
@@ -190,7 +189,7 @@ func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttr
 		if n.fileInfo.IsDir() {
 			return syscall.EISDIR
 		}
-		if size > 0 && n.data == nil {
+		if size > 0 && n.buf.data == nil {
 			if errno := n.ensureDataLocked(ctx); errno != 0 {
 				return errno
 			}
@@ -216,7 +215,7 @@ func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttr
 			return errno
 		}
 	} else if mtime != nil {
-		n.wfClient.cache.Set(n.Path(), n.fileInfo)
+		n.wfClient.CacheSet(n.Path(), n.fileInfo)
 	}
 
 	n.fillAttr(ctx, &out.Attr)
@@ -284,11 +283,11 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 	}
 
 	if flags&syscall.O_TRUNC != 0 {
-		n.data = []byte{}
+		n.buf.data = []byte{}
 		n.fileInfo.ObjectInfo.Size = 0
 		n.markModifiedLocked(time.Now())
-		n.dirty = true
-	} else if n.data == nil {
+		n.buf.dirty = true
+	} else if n.buf.data == nil {
 		if errno := n.ensureDataLocked(ctx); errno != 0 {
 			return nil, 0, errno
 		}
@@ -310,22 +309,22 @@ func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off in
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	if n.data == nil {
+	if n.buf.data == nil {
 		if errno := n.ensureDataLocked(ctx); errno != 0 {
 			return nil, errno
 		}
 	}
 
 	end := off + int64(len(dest))
-	if end > int64(len(n.data)) {
-		end = int64(len(n.data))
+	if end > int64(len(n.buf.data)) {
+		end = int64(len(n.buf.data))
 	}
 
-	if off >= int64(len(n.data)) {
+	if off >= int64(len(n.buf.data)) {
 		return fuse.ReadResultData([]byte{}), 0
 	}
 
-	result := n.data[off:end]
+	result := n.buf.data[off:end]
 	return fuse.ReadResultData(result), 0
 }
 
@@ -337,23 +336,23 @@ func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off i
 	if off < 0 {
 		return 0, syscall.EINVAL
 	}
-	if n.data == nil {
+	if n.buf.data == nil {
 		if errno := n.ensureDataLocked(ctx); errno != 0 {
 			return 0, errno
 		}
 	}
 
 	end := off + int64(len(data))
-	if int64(len(n.data)) < end {
+	if int64(len(n.buf.data)) < end {
 		newData := make([]byte, end)
-		copy(newData, n.data)
-		n.data = newData
+		copy(newData, n.buf.data)
+		n.buf.data = newData
 	}
-	copy(n.data[off:], data)
+	copy(n.buf.data[off:], data)
 
-	n.fileInfo.ObjectInfo.Size = int64(len(n.data))
+	n.fileInfo.ObjectInfo.Size = int64(len(n.buf.data))
 	n.markModifiedLocked(time.Now())
-	n.dirty = true
+	n.buf.dirty = true
 
 	return uint32(len(data)), 0
 }
@@ -394,7 +393,7 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 	}
 
 	wsInfo := info.(WSFileInfo)
-	childNode := &WSNode{wfClient: n.wfClient, fileInfo: wsInfo, data: []byte{}}
+	childNode := &WSNode{wfClient: n.wfClient, fileInfo: wsInfo, buf: fileBuffer{data: []byte{}}}
 	childNode.fillAttr(ctx, &out.Attr)
 
 	out.SetEntryTimeout(60)
@@ -501,7 +500,7 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 	return 0
 }
 
-func NewRootNode(wfClient *WorkspaceFilesClient, rootPath string) (*WSNode, error) {
+func NewRootNode(wfClient WorkspaceFilesAPI, rootPath string) (*WSNode, error) {
 	info, err := wfClient.Stat(context.Background(), rootPath)
 
 	if err != nil {

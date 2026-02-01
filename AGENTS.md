@@ -1,10 +1,15 @@
 # AGENTS.md
 
-This file describes how to work on this repository as an AI coding agent.
+AI coding agent guidance for this repo.
+
+## Workflow (must follow)
+1. Confirm `Task.md` and select the task to work on.
+2. Implement the task.
+3. Run tests to confirm no regression.
+4. Update `Task.md` when progress changes.
 
 ## Project overview
-
-`wsfs` is a FUSE-based filesystem that mounts Databricks Workspace Files into a local path.
+`wsfs` is a FUSE-based filesystem that mounts Databricks Workspace Files locally.
 
 Key entry points:
 - `main.go`: CLI entry point and mount setup.
@@ -12,56 +17,46 @@ Key entry points:
 - `node.go`: FUSE node implementation.
 - `scripts/fuse_test.sh`: Filesystem integration tests.
 
-## Current implementation notes
-
-- `Setattr` supports size changes (truncate) and mtime updates; mode/uid/gid are explicitly unsupported (return ENOTSUP). atime-only updates are unsupported; combined mtime+atime (e.g., `touch`) works.
-- Stable inode IDs are derived from Databricks `ObjectId`/`ResourceId`/`Path` to avoid editor save errors (e.g., Vim E949).
+## Current behavior notes
+- `Setattr` supports size changes (truncate) and mtime updates; mode/uid/gid are ENOTSUP.
+- atime-only updates are ENOTSUP; combined mtime+atime (e.g., `touch`) works.
+- Stable inode IDs are derived from Databricks `ObjectId`/`ResourceId`/`Path` to avoid editor save errors.
 - Vim save paths (default/backup/swap) are validated in `scripts/fuse_test.sh`.
 
 ## Environment
-
-Required environment variables (do not commit secrets):
+Required env vars (do not commit secrets):
 - `DATABRICKS_HOST`
 - `DATABRICKS_TOKEN`
 
-The repository expects a local `.env` for development, but `.env` must never be committed.
+Local `.env` is expected for development, but must never be committed.
 
-## Build
-
+## Build & run
+Build:
 ```bash
 go build -o wsfs
 ```
 
-## Run (local)
-
+Run:
 ```bash
 ./wsfs <mount-point>
 ```
 
-Use `-debug` to enable verbose FUSE logs:
-
+Debug:
 ```bash
 ./wsfs -debug <mount-point>
 ```
 
 ## Tests
-
-### Docker (recommended on macOS)
-
-Uses `docker-compose.yml`, mounts `/dev/fuse`, and runs the existing test script:
-
+Docker (macOS recommended):
 ```bash
 docker compose run --rm --build wsfs-test
 ```
 
-Notes:
-- Development is commonly done on macOS using Docker; the test image includes Vim to exercise editor save behavior.
-
-### Linux (direct)
-
+Linux (direct):
 ```bash
 sudo apt-get update
 sudo apt-get install -y fuse3
+sudo apt-get install -y vim
 echo 'user_allow_other' | sudo tee -a /etc/fuse.conf
 mkdir -p /mnt/wsfs
 go build -o tmp/wsfs
@@ -71,12 +66,10 @@ fusermount3 -u /mnt/wsfs
 ```
 
 ## Coding conventions
-
 - Keep changes small and focused.
-- Avoid logging noise; use `-debug` gated logs when adding diagnostics.
+- Avoid logging noise; gate diagnostics behind `-debug`.
 - Prefer clear, maintainable Go code over cleverness.
 
 ## Repository hygiene
-
 - Do not commit secrets (e.g., `.env`).
-- Prefer updating README when adding new workflows or commands.
+- Update README when adding new workflows or commands.
