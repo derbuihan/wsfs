@@ -6,6 +6,7 @@ AI coding agent guidance for this repo.
 1. Confirm `Task.md` and select the task to work on.
 2. Implement the task.
 3. Run tests to confirm no regression.
+   - Always run `scripts/fuse_test.sh` after implementation. If it fails, fix the failing part.
 4. Update `Task.md` when progress changes.
 
 ## Project overview

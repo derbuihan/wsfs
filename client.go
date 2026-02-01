@@ -86,9 +86,15 @@ type objectInfoResponse struct {
 
 // WorkspaceFilesClient
 
+type apiDoer interface {
+	Do(ctx context.Context, method, path string,
+		headers map[string]string, queryParams map[string]any, request, response any,
+		visitors ...func(*http.Request) error) error
+}
+
 type WorkspaceFilesClient struct {
-	workspaceClient *databricks.WorkspaceClient
-	apiClient       *client.DatabricksClient
+	workspaceClient workspace.WorkspaceInterface
+	apiClient       apiDoer
 	cache           *Cache
 }
 
@@ -98,11 +104,18 @@ func NewWorkspaceFilesClient(w *databricks.WorkspaceClient) (*WorkspaceFilesClie
 		return nil, err
 	}
 
+	return NewWorkspaceFilesClientWithDeps(w.Workspace, databricksClient, nil), nil
+}
+
+func NewWorkspaceFilesClientWithDeps(workspaceClient workspace.WorkspaceInterface, apiClient apiDoer, cache *Cache) *WorkspaceFilesClient {
+	if cache == nil {
+		cache = NewCache(60 * time.Second)
+	}
 	return &WorkspaceFilesClient{
-		workspaceClient: w,
-		apiClient:       databricksClient,
-		cache:           NewCache(60 * time.Second),
-	}, nil
+		workspaceClient: workspaceClient,
+		apiClient:       apiClient,
+		cache:           cache,
+	}
 }
 
 func (c *WorkspaceFilesClient) Stat(ctx context.Context, filePath string) (fs.FileInfo, error) {
@@ -166,7 +179,7 @@ func (c *WorkspaceFilesClient) ReadDir(ctx context.Context, dirPath string) ([]f
 }
 
 func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]byte, error) {
-	resp, err := c.workspaceClient.Workspace.Export(ctx, workspace.ExportRequest{
+	resp, err := c.workspaceClient.Export(ctx, workspace.ExportRequest{
 		Path:   filePath,
 		Format: workspace.ExportFormatSource,
 	})
@@ -190,7 +203,7 @@ func (c *WorkspaceFilesClient) Write(ctx context.Context, filepath string, data 
 func (c *WorkspaceFilesClient) Delete(ctx context.Context, filePath string, recursive bool) error {
 	c.cache.Invalidate(filePath)
 
-	return c.workspaceClient.Workspace.Delete(ctx, workspace.Delete{
+	return c.workspaceClient.Delete(ctx, workspace.Delete{
 		Path:      filePath,
 		Recursive: recursive,
 	})
@@ -199,7 +212,7 @@ func (c *WorkspaceFilesClient) Delete(ctx context.Context, filePath string, recu
 func (c *WorkspaceFilesClient) Mkdir(ctx context.Context, dirPath string) error {
 	c.cache.Invalidate(dirPath)
 
-	return c.workspaceClient.Workspace.Mkdirs(ctx, workspace.Mkdirs{
+	return c.workspaceClient.Mkdirs(ctx, workspace.Mkdirs{
 		Path: dirPath,
 	})
 }

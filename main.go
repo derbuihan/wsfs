@@ -30,7 +30,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to get current user: %v", err)
 	}
-	log.Printf("Hello, %s! Mounting your Databricks workspace...", me.DisplayName)
+	debugf("Hello, %s! Mounting your Databricks workspace...", me.DisplayName)
 
 	// Set up Databricks FS client
 	wfclient, err := NewWorkspaceFilesClient(w)
@@ -65,8 +65,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Mount fail: %v\n", err)
 	}
-	log.Printf("Mounted Databricks workspace on %s", flag.Arg(0))
-	log.Println("Press Ctrl+C to unmount")
+	debugf("Mounted Databricks workspace on %s", flag.Arg(0))
+	debugf("Press Ctrl+C to unmount")
 
 	server.Wait()
 }

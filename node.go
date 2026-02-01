@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"hash/fnv"
-	"log"
 	"path"
 	"sync"
 	"syscall"
@@ -105,14 +104,14 @@ func (n *WSNode) flushLocked(ctx context.Context) syscall.Errno {
 
 	err := n.wfClient.Write(ctx, n.Path(), n.buf.data)
 	if err != nil {
-		log.Printf("Error writting back on Flush: %v", err)
+		debugf("Error writting back on Flush: %v", err)
 		return syscall.EIO
 	}
 	n.buf.dirty = false
 
 	info, err := n.wfClient.Stat(ctx, n.Path())
 	if err != nil {
-		log.Printf("Error refreshing file info after Flush: %v", err)
+		debugf("Error refreshing file info after Flush: %v", err)
 		return 0
 	}
 	n.fileInfo = info.(WSFileInfo)
@@ -382,13 +381,13 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 
 	err := n.wfClient.Write(ctx, childPath, []byte{})
 	if err != nil {
-		log.Printf("Error creating file on databricks: %v", err)
+		debugf("Error creating file on databricks: %v", err)
 		return nil, nil, 0, syscall.EIO
 	}
 
 	info, err := n.wfClient.Stat(ctx, childPath)
 	if err != nil {
-		log.Printf("Error stating new file: %v", err)
+		debugf("Error stating new file: %v", err)
 		return nil, nil, 0, syscall.EIO
 	}
 
@@ -419,7 +418,7 @@ func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
 
 	err = n.wfClient.Delete(ctx, childPath, false)
 	if err != nil {
-		log.Printf("Error deleting file on databricks: %v", err)
+		debugf("Error deleting file on databricks: %v", err)
 		return syscall.EIO
 	}
 
@@ -432,13 +431,13 @@ func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 	childPath := path.Join(n.Path(), name)
 	err := n.wfClient.Mkdir(ctx, childPath)
 	if err != nil {
-		log.Printf("Error creating directory on databricks: %v", err)
+		debugf("Error creating directory on databricks: %v", err)
 		return nil, syscall.EIO
 	}
 
 	info, err := n.wfClient.Stat(ctx, childPath)
 	if err != nil {
-		log.Printf("Error stating new directory: %v", err)
+		debugf("Error stating new directory: %v", err)
 		return nil, syscall.EIO
 	}
 
@@ -465,7 +464,7 @@ func (n *WSNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 	err = n.wfClient.Delete(ctx, childPath, false)
 	if err != nil {
-		log.Printf("Error deleting directory on databricks: %v", err)
+		debugf("Error deleting directory on databricks: %v", err)
 		return syscall.EIO
 	}
 
