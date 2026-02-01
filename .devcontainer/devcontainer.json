@@ -1,41 +1,34 @@
 {
-  "name": "WSFS Analysis Environment",
-  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "name": "WSFS Development Environment",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
   "remoteUser": "vscode",
-
+  "runArgs": ["--device=/dev/fuse"],
+  "privileged": true,
+  "capAdd": ["SYS_ADMIN"],
+  "securityOpt": ["apparmor:unconfined"],
   "features": {
     "ghcr.io/devcontainers/features/common-utils:2": {
       "installZsh": true,
-      "installOhMyZsh": true,
-      "installOhMyZshConfig": true,
-      "configureZshAsDefaultShell": true,
-      "upgradePackages": true,
-      "username": "vscode",
-      "userUid": "automatic",
-      "userGid": "automatic"
+      "configureZshAsDefaultShell": true
     },
     "ghcr.io/devcontainers/features/go:1": {
       "version": "1.22"
     },
     "ghcr.io/devcontainers/features/github-cli:1": {}
   },
-
-  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y gdb binutils file strace ltrace build-essential vim nano libfuse-dev fuse fuse",
-
-  "privileged": true,
-  "capAdd": ["SYS_ADMIN"],
-  "securityOpt": ["apparmor:unconfined"],
-
+  "postStartCommand": ".devcontainer/start-wsfs.sh",
   "customizations": {
     "vscode": {
       "settings": {
         "terminal.integrated.defaultProfile.linux": "zsh",
         "editor.formatOnSave": true,
         "[go]": {
-            "editor.defaultFormatter": "golang.go"
+          "editor.defaultFormatter": "golang.go"
         }
       },
-      "extensions": ["ms-vscode.cpptools", "saoudrizwan.claude-dev", "golang.go"]
+      "extensions": ["golang.go", "ms-vscode.cpptools"]
     }
   }
 }
