@@ -368,15 +368,14 @@ func (c *WorkspaceFilesClient) Rename(ctx context.Context, source_path string, d
 		"destination_path": destination_path,
 	}
 
-	var data []byte
-	err := c.apiClient.Do(ctx, http.MethodPost, urlPath, nil, nil, reqBody, data, nil)
+	err := c.apiClient.Do(ctx, http.MethodPost, urlPath, nil, nil, reqBody, nil)
 	if err != nil {
 		return err
 	}
 
 	c.cache.Invalidate(source_path)
 	c.cache.Invalidate(destination_path)
-	return err
+	return nil
 }
 
 // Helpers
