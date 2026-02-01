@@ -12,18 +12,23 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"wsfs/internal/buffer"
 	"wsfs/internal/databricks"
 	"wsfs/internal/filecache"
 	"wsfs/internal/logging"
 )
+
+// fileBuffer holds in-memory file data and dirty state.
+type fileBuffer struct {
+	Data  []byte
+	Dirty bool
+}
 
 type WSNode struct {
 	fs.Inode
 	wfClient  databricks.WorkspaceFilesAPI
 	diskCache *filecache.DiskCache
 	fileInfo  databricks.WSFileInfo
-	buf       buffer.FileBuffer
+	buf       fileBuffer
 	mu        sync.Mutex
 }
 
@@ -515,7 +520,7 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 	}
 
 	wsInfo := info.(databricks.WSFileInfo)
-	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo, buf: buffer.FileBuffer{Data: []byte{}}}
+	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo, buf: fileBuffer{Data: []byte{}}}
 	childNode.fillAttr(ctx, &out.Attr)
 
 	out.SetEntryTimeout(60)

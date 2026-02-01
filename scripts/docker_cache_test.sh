@@ -4,46 +4,18 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT_DIR"
 
-: "${DATABRICKS_HOST:?DATABRICKS_HOST is required}"
-: "${DATABRICKS_TOKEN:?DATABRICKS_TOKEN is required}"
+# Source common Docker functions
+source "$ROOT_DIR/scripts/docker_common.sh"
 
-if command -v fusermount3 >/dev/null 2>&1; then
-  FUSERMOUNT=fusermount3
-elif command -v fusermount >/dev/null 2>&1; then
-  FUSERMOUNT=fusermount
-else
-  echo "fusermount not found; install fuse/fuse3"
-  exit 1
-fi
+mkdir -p "$MOUNT_DIR" "$CACHE_DIR"
 
-GO_BIN=${GO_BIN:-/usr/local/go/bin/go}
-MOUNT_DIR=${WSFS_MOUNT_DIR:-/mnt/wsfs}
-BIN_DIR=${WSFS_BIN_DIR:-"$ROOT_DIR/tmp"}
-CACHE_DIR=${WSFS_CACHE_DIR:-/tmp/wsfs-cache-test}
-LOG_FILE=${WSFS_LOG_FILE:-/tmp/wsfs-test.log}
-
-mkdir -p "$MOUNT_DIR" "$BIN_DIR" "$CACHE_DIR"
-
-echo "========================================"
-echo "Building wsfs..."
-echo "========================================"
-"$GO_BIN" build -o "$BIN_DIR/wsfs" ./cmd/wsfs
-
-is_mounted() {
-  grep -q " $MOUNT_DIR " /proc/mounts
-}
+# Build wsfs
+build_wsfs
 
 WSFS_PID=""
 
 cleanup() {
-  set +e
-  if is_mounted; then
-    "$FUSERMOUNT" -u "$MOUNT_DIR" || umount "$MOUNT_DIR"
-  fi
-  if [ -n "$WSFS_PID" ]; then
-    kill "$WSFS_PID" 2>/dev/null || true
-    wait "$WSFS_PID" 2>/dev/null || true
-  fi
+  cleanup_wsfs "$WSFS_PID"
 }
 trap cleanup EXIT
 
@@ -62,12 +34,7 @@ echo "  - Cache TTL: 24h"
 echo "  - Debug: enabled"
 echo ""
 
-# Clean up cache directory (but not if it's a volume mount)
-if [ -d "$CACHE_DIR" ]; then
-  rm -rf "$CACHE_DIR"/* 2>/dev/null || true
-else
-  mkdir -p "$CACHE_DIR"
-fi
+clean_cache_dir
 
 # Mount with default cache settings and debug logging
 "$BIN_DIR/wsfs" \
@@ -79,16 +46,7 @@ fi
   "$MOUNT_DIR" > "$LOG_FILE" 2>&1 &
 WSFS_PID=$!
 
-# Wait for mount
-for _ in $(seq 1 30); do
-  if is_mounted; then
-    break
-  fi
-  sleep 1
-done
-
-if ! is_mounted; then
-  echo "Mount did not become ready at $MOUNT_DIR"
+if ! wait_for_mount 30; then
   cat "$LOG_FILE"
   exit 1
 fi
@@ -115,6 +73,7 @@ bash "$ROOT_DIR/scripts/databricks_cli_verification_test.sh" "$MOUNT_DIR"
 
 # Unmount
 cleanup
+WSFS_PID=""
 sleep 2
 
 # ========================================
@@ -128,12 +87,7 @@ echo "Settings:"
 echo "  - Cache: disabled"
 echo ""
 
-# Clean cache directory (but not if it's a volume mount)
-if [ -d "$CACHE_DIR" ]; then
-  rm -rf "$CACHE_DIR"/* 2>/dev/null || true
-else
-  mkdir -p "$CACHE_DIR"
-fi
+clean_cache_dir
 
 # Mount with cache disabled
 "$BIN_DIR/wsfs" \
@@ -142,16 +96,7 @@ fi
   "$MOUNT_DIR" > "$LOG_FILE" 2>&1 &
 WSFS_PID=$!
 
-# Wait for mount
-for _ in $(seq 1 30); do
-  if is_mounted; then
-    break
-  fi
-  sleep 1
-done
-
-if ! is_mounted; then
-  echo "Mount did not become ready at $MOUNT_DIR"
+if ! wait_for_mount 30; then
   cat "$LOG_FILE"
   exit 1
 fi
@@ -189,6 +134,7 @@ rm -rf "$TEST_DIR"
 
 # Unmount
 cleanup
+WSFS_PID=""
 sleep 2
 
 # ========================================
@@ -203,12 +149,7 @@ echo "  - Cache: enabled"
 echo "  - Cache TTL: 5s"
 echo ""
 
-# Clean cache directory (but not if it's a volume mount)
-if [ -d "$CACHE_DIR" ]; then
-  rm -rf "$CACHE_DIR"/* 2>/dev/null || true
-else
-  mkdir -p "$CACHE_DIR"
-fi
+clean_cache_dir
 
 # Mount with short TTL
 "$BIN_DIR/wsfs" \
@@ -219,16 +160,7 @@ fi
   "$MOUNT_DIR" > "$LOG_FILE" 2>&1 &
 WSFS_PID=$!
 
-# Wait for mount
-for _ in $(seq 1 30); do
-  if is_mounted; then
-    break
-  fi
-  sleep 1
-done
-
-if ! is_mounted; then
-  echo "Mount did not become ready at $MOUNT_DIR"
+if ! wait_for_mount 30; then
   cat "$LOG_FILE"
   exit 1
 fi
@@ -272,6 +204,7 @@ rm -rf "$TEST_DIR"
 
 # Unmount
 cleanup
+WSFS_PID=""
 sleep 2
 
 # ========================================
@@ -286,12 +219,7 @@ echo "  - Cache: enabled"
 echo "  - Cache size: 1MB"
 echo ""
 
-# Clean cache directory (but not if it's a volume mount)
-if [ -d "$CACHE_DIR" ]; then
-  rm -rf "$CACHE_DIR"/* 2>/dev/null || true
-else
-  mkdir -p "$CACHE_DIR"
-fi
+clean_cache_dir
 
 # Mount with small cache size (1MB)
 "$BIN_DIR/wsfs" \
@@ -302,16 +230,7 @@ fi
   "$MOUNT_DIR" > "$LOG_FILE" 2>&1 &
 WSFS_PID=$!
 
-# Wait for mount
-for _ in $(seq 1 30); do
-  if is_mounted; then
-    break
-  fi
-  sleep 1
-done
-
-if ! is_mounted; then
-  echo "Mount did not become ready at $MOUNT_DIR"
+if ! wait_for_mount 30; then
   cat "$LOG_FILE"
   exit 1
 fi
@@ -360,6 +279,7 @@ rm -rf "$TEST_DIR"
 
 # Unmount
 cleanup
+WSFS_PID=""
 
 # ========================================
 # All Tests Complete

@@ -10,7 +10,6 @@ import (
 	"github.com/databricks/databricks-sdk-go/service/workspace"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"wsfs/internal/buffer"
 	"wsfs/internal/databricks"
 )
 
@@ -20,7 +19,7 @@ func TestWSNodeTruncateLockedShrinks(t *testing.T) {
 			ObjectType: workspace.ObjectTypeFile,
 			Size:       10,
 		}},
-		buf: buffer.FileBuffer{Data: []byte("0123456789")},
+		buf: fileBuffer{Data: []byte("0123456789")},
 	}
 
 	n.truncateLocked(5)
@@ -147,7 +146,7 @@ func TestWSNodeWriteAtOffset(t *testing.T) {
 			Size:       int64(len(initialData)),
 		}},
 		// Pre-populate buffer to avoid ensureDataLocked reading fresh data
-		buf: buffer.FileBuffer{Data: []byte("Hello, World!"), Dirty: false},
+		buf: fileBuffer{Data: []byte("Hello, World!"), Dirty: false},
 	}
 
 	// Write at beginning
@@ -188,7 +187,7 @@ func TestWSNodeWriteNegativeOffset(t *testing.T) {
 			Path:       "/test.txt",
 			Size:       0,
 		}},
-		buf: buffer.FileBuffer{Data: []byte{}},
+		buf: fileBuffer{Data: []byte{}},
 	}
 
 	_, errno := n.Write(context.Background(), nil, []byte("test"), -1)
@@ -239,7 +238,7 @@ func TestWSNodeFlushCleanBuffer(t *testing.T) {
 			ObjectType: workspace.ObjectTypeFile,
 			Path:       "/test.txt",
 		}},
-		buf: buffer.FileBuffer{Data: []byte("test"), Dirty: false},
+		buf: fileBuffer{Data: []byte("test"), Dirty: false},
 	}
 
 	errno := n.Flush(context.Background(), nil)
@@ -272,7 +271,7 @@ func TestWSNodeFlushDirtyBuffer(t *testing.T) {
 			ObjectType: workspace.ObjectTypeFile,
 			Path:       "/test.txt",
 		}},
-		buf: buffer.FileBuffer{Data: []byte("new content"), Dirty: true},
+		buf: fileBuffer{Data: []byte("new content"), Dirty: true},
 	}
 
 	errno := n.Flush(context.Background(), nil)
@@ -309,7 +308,7 @@ func TestWSNodeRelease(t *testing.T) {
 			ObjectType: workspace.ObjectTypeFile,
 			Path:       "/test.txt",
 		}},
-		buf: buffer.FileBuffer{Data: []byte("content"), Dirty: true},
+		buf: fileBuffer{Data: []byte("content"), Dirty: true},
 	}
 
 	errno := n.Release(context.Background(), nil)
@@ -346,7 +345,7 @@ func TestWSNodeFsync(t *testing.T) {
 			ObjectType: workspace.ObjectTypeFile,
 			Path:       "/test.txt",
 		}},
-		buf: buffer.FileBuffer{Data: []byte("synced content"), Dirty: true},
+		buf: fileBuffer{Data: []byte("synced content"), Dirty: true},
 	}
 
 	errno := n.Fsync(context.Background(), nil, 0)

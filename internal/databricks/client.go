@@ -18,7 +18,7 @@ import (
 	"github.com/databricks/databricks-sdk-go/client"
 	"github.com/databricks/databricks-sdk-go/service/workspace"
 
-	"wsfs/internal/cache"
+	"wsfs/internal/metacache"
 	"wsfs/internal/logging"
 )
 
@@ -110,7 +110,7 @@ type workspaceClient interface {
 type WorkspaceFilesClient struct {
 	workspaceClient workspaceClient
 	apiClient       apiDoer
-	cache           *cache.Cache
+	cache           *metacache.Cache
 }
 
 func NewWorkspaceFilesClient(w *databricks.WorkspaceClient) (*WorkspaceFilesClient, error) {
@@ -122,9 +122,9 @@ func NewWorkspaceFilesClient(w *databricks.WorkspaceClient) (*WorkspaceFilesClie
 	return NewWorkspaceFilesClientWithDeps(w.Workspace, databricksClient, nil), nil
 }
 
-func NewWorkspaceFilesClientWithDeps(workspaceClient workspaceClient, apiClient apiDoer, c *cache.Cache) *WorkspaceFilesClient {
+func NewWorkspaceFilesClientWithDeps(workspaceClient workspaceClient, apiClient apiDoer, c *metacache.Cache) *WorkspaceFilesClient {
 	if c == nil {
-		c = cache.NewCache(60 * time.Second)
+		c = metacache.NewCache(60 * time.Second)
 	}
 	return &WorkspaceFilesClient{
 		workspaceClient: workspaceClient,

@@ -14,7 +14,7 @@ import (
 
 	"github.com/databricks/databricks-sdk-go/service/workspace"
 
-	"wsfs/internal/cache"
+	"wsfs/internal/metacache"
 )
 
 // TestStatCaching verifies that Stat caches results correctly
@@ -268,7 +268,7 @@ func TestWriteViaNewFiles(t *testing.T) {
 		},
 	}
 
-	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, cache.NewCache(1*time.Second))
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, metacache.NewCache(1*time.Second))
 
 	err := client.Write(context.Background(), "/test.txt", testContent)
 	if err != nil {
@@ -303,7 +303,7 @@ func TestWriteFallbackToImportFile(t *testing.T) {
 		},
 	}
 
-	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, cache.NewCache(1*time.Second))
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, metacache.NewCache(1*time.Second))
 
 	err := client.Write(context.Background(), "/test.txt", testContent)
 	if err != nil {
@@ -414,7 +414,7 @@ func TestCacheInvalidation(t *testing.T) {
 		},
 	}
 
-	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, cache.NewCache(10*time.Second))
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, metacache.NewCache(10*time.Second))
 
 	// First Stat should call API
 	_, err := client.Stat(context.Background(), "/test.txt")

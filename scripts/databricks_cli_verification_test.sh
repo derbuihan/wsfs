@@ -6,39 +6,9 @@
 
 set -euo pipefail
 
-GREEN="\033[0;32m"
-RED="\033[0;31m"
-YELLOW="\033[1;33m"
-BLUE="\033[0;34m"
-NC="\033[0m"
-
-run_cmd() {
-  echo -e "${YELLOW}\$ $1${NC}"
-  eval "$1"
-}
-
-assert() {
-  if eval "$1"; then
-    echo -e "${GREEN}✓ PASS:${NC} $2"
-  else
-    echo -e "${RED}✗ FAIL:${NC} $2"
-    exit 1
-  fi
-}
-
-assert_eq() {
-  local expected="$1"
-  local actual="$2"
-  local description="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo -e "${GREEN}✓ PASS:${NC} $description"
-  else
-    echo -e "${RED}✗ FAIL:${NC} $description"
-    echo -e "  Expected: $expected"
-    echo -e "  Actual:   $actual"
-    exit 1
-  fi
-}
+# Source common test helpers
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/test_helpers.sh"
 
 # Setup
 MOUNT_POINT="${1:-/mnt/wsfs}"

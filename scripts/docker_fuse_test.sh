@@ -4,55 +4,28 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT_DIR"
 
-: "${DATABRICKS_HOST:?DATABRICKS_HOST is required}"
-: "${DATABRICKS_TOKEN:?DATABRICKS_TOKEN is required}"
+# Source common Docker functions
+source "$ROOT_DIR/scripts/docker_common.sh"
 
-if command -v fusermount3 >/dev/null 2>&1; then
-  FUSERMOUNT=fusermount3
-elif command -v fusermount >/dev/null 2>&1; then
-  FUSERMOUNT=fusermount
-else
-  echo "fusermount not found; install fuse/fuse3"
-  exit 1
-fi
+# Build wsfs
+build_wsfs
 
-GO_BIN=${GO_BIN:-/usr/local/go/bin/go}
-MOUNT_DIR=${WSFS_MOUNT_DIR:-/mnt/wsfs}
-BIN_DIR=${WSFS_BIN_DIR:-"$ROOT_DIR/tmp"}
+# Create mount directory
+mkdir -p "$MOUNT_DIR"
 
-mkdir -p "$MOUNT_DIR" "$BIN_DIR"
-
-"$GO_BIN" build -o "$BIN_DIR/wsfs" ./cmd/wsfs
-
+# Mount wsfs (simple mode without cache options)
 "$BIN_DIR/wsfs" "$MOUNT_DIR" &
 WSFS_PID=$!
 
-is_mounted() {
-  grep -q " $MOUNT_DIR " /proc/mounts
-}
+# Register cleanup
+trap 'cleanup_wsfs "$WSFS_PID"' EXIT
 
-cleanup() {
-  set +e
-  if is_mounted; then
-    "$FUSERMOUNT" -u "$MOUNT_DIR" || umount "$MOUNT_DIR"
-  fi
-  kill "$WSFS_PID" 2>/dev/null || true
-  wait "$WSFS_PID" 2>/dev/null || true
-}
-trap cleanup EXIT
-
-for _ in $(seq 1 30); do
-  if is_mounted; then
-    break
-  fi
-  sleep 1
-done
-
-if ! is_mounted; then
-  echo "Mount did not become ready at $MOUNT_DIR"
+# Wait for mount
+if ! wait_for_mount 30; then
   exit 1
 fi
 
+# Run FUSE tests
 bash "$ROOT_DIR/scripts/fuse_test.sh" "$MOUNT_DIR"
 
 echo ""

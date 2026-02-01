@@ -1,4 +1,4 @@
-package cache
+package metacache
 
 import (
 	"io/fs"
