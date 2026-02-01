@@ -22,6 +22,52 @@ import (
 	"wsfs/internal/logging"
 )
 
+// HTTP client timeout for signed URL operations
+const httpTimeout = 2 * time.Minute
+
+// Maximum length for response body in error messages
+const maxErrorBodyLen = 200
+
+// sanitizeURL removes query parameters from a URL to avoid exposing signed tokens
+func sanitizeURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "[invalid URL]"
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+// sanitizeError removes sensitive information from error messages
+func sanitizeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	// Remove potential URLs with tokens (look for https:// patterns)
+	// This is a simple heuristic - URLs in error messages often contain signed tokens
+	if strings.Contains(msg, "https://") || strings.Contains(msg, "http://") {
+		// Try to find and sanitize URLs in the message
+		words := strings.Fields(msg)
+		for i, word := range words {
+			if strings.HasPrefix(word, "http://") || strings.HasPrefix(word, "https://") {
+				words[i] = sanitizeURL(word)
+			}
+		}
+		return strings.Join(words, " ")
+	}
+	return msg
+}
+
+// truncateBody truncates a response body for safe logging
+func truncateBody(body string, maxLen int) string {
+	if len(body) <= maxLen {
+		return body
+	}
+	return body[:maxLen] + "...[truncated]"
+}
+
 // WSFileInfo
 
 type WSFileInfo struct {
@@ -232,8 +278,8 @@ func (c *WorkspaceFilesClient) readViaSignedURL(ctx context.Context, url string,
 		req.Header.Set(k, v)
 	}
 
-	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Do(req)
+	httpClient := &http.Client{Timeout: httpTimeout}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +324,7 @@ func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]
 			logging.Debugf("Read via signed URL succeeded for path: %s", actualPath)
 			return data, nil
 		}
-		logging.Debugf("Read via signed URL failed for path: %s, falling back to Export: %v", actualPath, err)
+		logging.Debugf("Read via signed URL failed for path: %s, falling back to Export: %s", actualPath, sanitizeError(err))
 	}
 
 	// 3. Fallback: workspace.Export
@@ -327,8 +373,8 @@ func (c *WorkspaceFilesClient) writeViaNewFiles(ctx context.Context, filepath st
 		req.Header.Set(k, v)
 	}
 
-	client := &http.Client{Timeout: 5 * time.Minute}
-	putResp, err := client.Do(req)
+	httpClient := &http.Client{Timeout: httpTimeout}
+	putResp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -336,7 +382,7 @@ func (c *WorkspaceFilesClient) writeViaNewFiles(ctx context.Context, filepath st
 
 	if putResp.StatusCode != http.StatusOK && putResp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(putResp.Body)
-		return fmt.Errorf("signed URL PUT failed with status %d: %s", putResp.StatusCode, string(body))
+		return fmt.Errorf("signed URL PUT failed with status %d: %s", putResp.StatusCode, truncateBody(string(body), maxErrorBodyLen))
 	}
 
 	return nil
@@ -384,7 +430,7 @@ func (c *WorkspaceFilesClient) Write(ctx context.Context, filepath string, data 
 		logging.Debugf("Write via new-files succeeded for path: %s", actualPath)
 		return nil
 	}
-	logging.Debugf("Write via new-files failed for path: %s, trying write-files: %v", actualPath, err)
+	logging.Debugf("Write via new-files failed for path: %s, trying write-files: %s", actualPath, sanitizeError(err))
 
 	// 2. Try write-files (experimental)
 	err = c.writeViaWriteFiles(ctx, actualPath, data)
@@ -392,7 +438,7 @@ func (c *WorkspaceFilesClient) Write(ctx context.Context, filepath string, data 
 		logging.Debugf("Write via write-files succeeded for path: %s", actualPath)
 		return nil
 	}
-	logging.Debugf("Write via write-files failed for path: %s, falling back to import-file: %v", actualPath, err)
+	logging.Debugf("Write via write-files failed for path: %s, falling back to import-file: %s", actualPath, sanitizeError(err))
 
 	// 3. Fallback: import-file
 	urlPath := fmt.Sprintf(

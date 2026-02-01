@@ -190,7 +190,7 @@ func (n *WSNode) flushLocked(ctx context.Context) syscall.Errno {
 	remotePath := n.Path()
 	err := n.wfClient.Write(ctx, remotePath, n.buf.Data)
 	if err != nil {
-		logging.Debugf("Error writting back on Flush: %v", err)
+		logging.Debugf("Error writing back on Flush: %v", err)
 		return syscall.EIO
 	}
 	n.buf.Dirty = false

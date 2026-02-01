@@ -1112,3 +1112,140 @@ func TestRenameNotebook(t *testing.T) {
 		t.Errorf("Expected dest path without .ipynb, got %s", destPathUsed)
 	}
 }
+
+// TestSanitizeURL verifies URL sanitization removes query parameters
+func TestSanitizeURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "URL with query params",
+			input:    "https://storage.example.com/bucket/file?sig=secret123&token=abc",
+			expected: "https://storage.example.com/bucket/file",
+		},
+		{
+			name:     "URL without query params",
+			input:    "https://storage.example.com/bucket/file",
+			expected: "https://storage.example.com/bucket/file",
+		},
+		{
+			name:     "URL with fragment",
+			input:    "https://example.com/page#section",
+			expected: "https://example.com/page",
+		},
+		{
+			name:     "Invalid URL",
+			input:    "://invalid",
+			expected: "[invalid URL]",
+		},
+		{
+			name:     "URL with port",
+			input:    "https://example.com:8080/path?token=secret",
+			expected: "https://example.com:8080/path",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := sanitizeURL(tt.input)
+			if result != tt.expected {
+				t.Errorf("sanitizeURL(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestSanitizeError verifies error message sanitization
+func TestSanitizeError(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    error
+		contains []string    // strings that should be present
+		excludes []string    // strings that should NOT be present
+	}{
+		{
+			name:     "nil error",
+			input:    nil,
+			contains: []string{""},
+		},
+		{
+			name:     "simple error without URL",
+			input:    fmt.Errorf("connection timeout"),
+			contains: []string{"connection timeout"},
+		},
+		{
+			name:     "error with URL containing token",
+			input:    fmt.Errorf("GET https://storage.example.com/file?sig=SECRET_TOKEN&exp=123 failed"),
+			contains: []string{"GET", "storage.example.com/file", "failed"},
+			excludes: []string{"SECRET_TOKEN", "sig=", "exp="},
+		},
+		{
+			name:     "error with multiple URLs",
+			input:    fmt.Errorf("redirect from https://a.com?t=1 to https://b.com?t=2"),
+			contains: []string{"redirect", "from", "to"},
+			excludes: []string{"t=1", "t=2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := sanitizeError(tt.input)
+			for _, s := range tt.contains {
+				if !strings.Contains(result, s) {
+					t.Errorf("sanitizeError() = %q, should contain %q", result, s)
+				}
+			}
+			for _, s := range tt.excludes {
+				if strings.Contains(result, s) {
+					t.Errorf("sanitizeError() = %q, should NOT contain %q", result, s)
+				}
+			}
+		})
+	}
+}
+
+// TestTruncateBody verifies body truncation
+func TestTruncateBody(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		maxLen   int
+		expected string
+	}{
+		{
+			name:     "short body",
+			body:     "short",
+			maxLen:   100,
+			expected: "short",
+		},
+		{
+			name:     "exact length",
+			body:     "exact",
+			maxLen:   5,
+			expected: "exact",
+		},
+		{
+			name:     "long body",
+			body:     "this is a very long body that needs truncation",
+			maxLen:   10,
+			expected: "this is a ...[truncated]",
+		},
+		{
+			name:     "empty body",
+			body:     "",
+			maxLen:   100,
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := truncateBody(tt.body, tt.maxLen)
+			if result != tt.expected {
+				t.Errorf("truncateBody(%q, %d) = %q, want %q", tt.body, tt.maxLen, result, tt.expected)
+			}
+		})
+	}
+}
