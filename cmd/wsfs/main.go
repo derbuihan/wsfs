@@ -25,7 +25,8 @@ import (
 const shutdownTimeout = 30 * time.Second
 
 func main() {
-	debug := flag.Bool("debug", false, "print debug data")
+	debug := flag.Bool("debug", false, "print debug data (equivalent to --log-level=debug)")
+	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
 	allowOther := flag.Bool("allow-other", false, "allow other users to access the mount")
 
 	// Cache configuration
@@ -38,7 +39,13 @@ func main() {
 	if len(flag.Args()) < 1 {
 		log.Fatalf("Usage: %s MOUNTPOINT", os.Args[0])
 	}
-	logging.DebugLogs = *debug
+
+	// Set log level (--debug takes precedence for backward compatibility)
+	if *debug {
+		logging.SetLevel(logging.LevelDebug)
+	} else {
+		logging.SetLevel(logging.ParseLevel(*logLevel))
+	}
 
 	// Set up Databricks client
 	w, err := databrickssdk.NewWorkspaceClient()
@@ -49,7 +56,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to get current user: %v", err)
 	}
-	logging.Debugf("Hello, %s! Mounting your Databricks workspace...", me.DisplayName)
+	logging.Infof("Hello, %s! Mounting your Databricks workspace...", me.DisplayName)
 
 	// Set up disk cache
 	var diskCache *filecache.DiskCache
@@ -111,8 +118,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Mount fail: %v\n", err)
 	}
-	logging.Debugf("Mounted Databricks workspace on %s", flag.Arg(0))
-	logging.Debugf("Press Ctrl+C to unmount")
+	logging.Infof("Mounted Databricks workspace on %s", flag.Arg(0))
+	logging.Infof("Press Ctrl+C to unmount")
 
 	// Signal handling for graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

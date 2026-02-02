@@ -165,13 +165,18 @@
   - [x] signal.NotifyContext でシグナルハンドリング
   - [x] dirty buffer の flush ポリシー策定（DirtyNodeRegistry で追跡）
   - [x] server.Unmount() の適切な呼び出し
-- [ ] ログレベル設定の追加（`--log-level` フラグ）
+- [x] ログレベル設定の追加（`--log-level` フラグ）
+  - DEBUG/INFO/WARN/ERROR レベル対応
+  - `--debug` フラグとの後方互換性維持
+  - `internal/logging/logging_test.go` にユニットテスト追加
 - [ ] 操作ごとの context.WithTimeout 設定
 
 ### P5-3: テスト・CI整備
 - [ ] Docker/CI 用の安定テストシナリオを整備
 - [ ] 重大リグレッションを検出するテストを固定化
-- [ ] `CopyToCache`, `sanitizeURL`, `sanitizeError` のユニットテスト追加
+- [x] `CopyToCache`, `sanitizeURL`, `sanitizeError` のユニットテスト追加
+  - `internal/databricks/client_test.go`: TestSanitizeURL, TestSanitizeError, TestTruncateBody
+  - `internal/filecache/disk_cache_test.go`: TestDiskCacheCopyToCache
 
 ---
 
@@ -209,8 +214,8 @@
 - [ ] 連続 truncate
 - [ ] 連続 rename/mv
 - [ ] 複数同時 write
-- [ ] `CopyToCache` のテスト
-- [ ] `sanitizeURL`, `sanitizeError` のテスト
+- [x] `CopyToCache` のテスト (`internal/filecache/disk_cache_test.go`: TestDiskCacheCopyToCache)
+- [x] `sanitizeURL`, `sanitizeError` のテスト (`internal/databricks/client_test.go`: TestSanitizeURL, TestSanitizeError)
 - [ ] 巨大ファイル（100MB+）のメモリ使用量テスト
 
 ---
@@ -274,10 +279,10 @@
 
 ### コード品質
 - ~~設定値の検証がない（負の値やエラーチェックが不十分）~~ → P4-4 で対応済み（キャッシュ設定の検証を追加）
-- ログレベルの制御が不十分（DEBUG/INFO/WARN/ERROR の区別なし）
+- ~~ログレベルの制御が不十分（DEBUG/INFO/WARN/ERROR の区別なし）~~ → P5-2 で対応済み（`--log-level` フラグ追加）
 
 ### テスト関連
-- `CopyToCache`、`sanitizeURL`、`sanitizeError` のテストがない
+- ~~`CopyToCache`、`sanitizeURL`、`sanitizeError` のテストがない~~ → P5-3 で対応済み（既存の実装を確認）
 - 並行アクセステストが不十分
 
 ### 既知のバグ/改善点
