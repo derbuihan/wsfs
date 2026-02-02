@@ -20,6 +20,7 @@ import (
 	"wsfs/internal/databricks"
 	"wsfs/internal/filecache"
 	"wsfs/internal/logging"
+	"wsfs/internal/pathutil"
 )
 
 // File system constants
@@ -488,8 +489,8 @@ func (n *WSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		}
 		name := e.Name()
 		// Add .ipynb extension for notebooks
-		if wsEntry, ok := e.(databricks.WSDirEntry); ok && wsEntry.IsNotebook() {
-			name = name + ".ipynb"
+		if wsEntry, ok := e.(databricks.WSDirEntry); ok {
+			name = pathutil.ToFuseName(name, wsEntry.IsNotebook())
 		}
 		fuseEntries[i] = fuse.DirEntry{Name: name, Mode: mode}
 	}
@@ -563,7 +564,7 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 				n.fileInfo = wsInfo
 				// Also invalidate disk cache
 				if n.diskCache != nil && !n.diskCache.IsDisabled() {
-					actualPath := strings.TrimSuffix(n.fileInfo.Path, ".ipynb")
+					actualPath := pathutil.ToRemotePath(n.fileInfo.Path)
 					n.diskCache.Delete(actualPath)
 				}
 			}
@@ -814,7 +815,7 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 
 	// For .ipynb files, create an empty Jupyter notebook
 	var initialContent []byte
-	if strings.HasSuffix(name, ".ipynb") {
+	if pathutil.HasNotebookSuffix(name) {
 		initialContent = []byte(`{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":4}`)
 	} else {
 		initialContent = []byte{}
@@ -885,8 +886,8 @@ func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return syscall.EIO
 	}
 
-	// Remove from cache (use actual path without .ipynb suffix)
-	actualPath := strings.TrimSuffix(childPath, ".ipynb")
+	// Remove from cache (use remote path without .ipynb suffix)
+	actualPath := pathutil.ToRemotePath(childPath)
 	if n.diskCache != nil && !n.diskCache.IsDisabled() {
 		if err := n.diskCache.Delete(actualPath); err != nil {
 			logging.Debugf("Failed to delete from cache %s: %v", actualPath, err)
@@ -997,9 +998,9 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 		return syscall.EIO
 	}
 
-	// Delete old path from cache (use actual path without .ipynb suffix)
-	actualOldPath := strings.TrimSuffix(oldPath, ".ipynb")
-	actualNewPath := strings.TrimSuffix(newPath, ".ipynb")
+	// Delete old path from cache (use remote path without .ipynb suffix)
+	actualOldPath := pathutil.ToRemotePath(oldPath)
+	actualNewPath := pathutil.ToRemotePath(newPath)
 	if n.diskCache != nil && !n.diskCache.IsDisabled() {
 		if err := n.diskCache.Delete(actualOldPath); err != nil {
 			logging.Debugf("Failed to delete old path from cache %s: %v", actualOldPath, err)

@@ -221,8 +221,12 @@
   - [ ] Flush/Release で一括アップロード
 
 ### P6-2: パス管理の改善
-- [ ] fusePath/remotePath の構造体分離
-- [ ] `.ipynb` 変換ロジックの入口/出口統一
+- [x] `.ipynb` 変換ロジックの一元化
+  - [x] `internal/pathutil/pathutil.go` パッケージ作成
+  - [x] `ToRemotePath()`, `ToFuseName()`, `HasNotebookSuffix()` 関数追加
+  - [x] `client.go` で pathutil 使用に置換（6箇所）
+  - [x] `node.go` で pathutil 使用に置換（5箇所）
+- [ ] fusePath/remotePath の構造体分離（将来対応・型安全ラッパー）
 
 ### P6-3: 観測性・運用性（オプション）
 - [ ] メトリクス出力（read/write/stat/err カウンタ）

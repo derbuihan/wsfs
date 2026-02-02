@@ -20,6 +20,7 @@ import (
 
 	"wsfs/internal/logging"
 	"wsfs/internal/metacache"
+	"wsfs/internal/pathutil"
 	"wsfs/internal/retry"
 )
 
@@ -201,8 +202,8 @@ func NewWorkspaceFilesClientWithDeps(workspaceClient workspaceClient, apiClient 
 
 func (c *WorkspaceFilesClient) Stat(ctx context.Context, filePath string) (fs.FileInfo, error) {
 	// Handle .ipynb suffix - try to find a notebook without the extension
-	if strings.HasSuffix(filePath, ".ipynb") {
-		basePath := strings.TrimSuffix(filePath, ".ipynb")
+	if pathutil.HasNotebookSuffix(filePath) {
+		basePath := pathutil.ToRemotePath(filePath)
 		info, err := c.statInternal(ctx, basePath)
 		if err == nil {
 			wsInfo, ok := toWSFileInfo(info)
@@ -306,7 +307,7 @@ func (c *WorkspaceFilesClient) readViaSignedURL(ctx context.Context, url string,
 
 func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]byte, error) {
 	// Strip .ipynb suffix to get the actual remote path
-	actualPath := strings.TrimSuffix(filePath, ".ipynb")
+	actualPath := pathutil.ToRemotePath(filePath)
 
 	// 1. Get signed URL from object-info (may already be cached in Stat())
 	info, err := c.Stat(ctx, filePath)
@@ -431,13 +432,13 @@ func (c *WorkspaceFilesClient) Write(ctx context.Context, filepath string, data 
 	}
 
 	// New file with .ipynb extension should be created as a notebook
-	if strings.HasSuffix(filepath, ".ipynb") {
+	if pathutil.HasNotebookSuffix(filepath) {
 		logging.Debugf("Creating new notebook: %s", filepath)
 		return c.WriteNotebook(ctx, filepath, data)
 	}
 
 	// Regular file handling
-	actualPath := strings.TrimSuffix(filepath, ".ipynb")
+	actualPath := pathutil.ToRemotePath(filepath)
 	c.cache.Invalidate(actualPath)
 
 	// 1. Try new-files (experimental)
@@ -466,7 +467,7 @@ func (c *WorkspaceFilesClient) Write(ctx context.Context, filepath string, data 
 }
 
 func (c *WorkspaceFilesClient) WriteNotebook(ctx context.Context, filePath string, data []byte) error {
-	actualPath := strings.TrimSuffix(filePath, ".ipynb")
+	actualPath := pathutil.ToRemotePath(filePath)
 	c.cache.Invalidate(actualPath)
 
 	return c.workspaceClient.Import(ctx, workspace.Import{
@@ -478,7 +479,7 @@ func (c *WorkspaceFilesClient) WriteNotebook(ctx context.Context, filePath strin
 }
 
 func (c *WorkspaceFilesClient) Delete(ctx context.Context, filePath string, recursive bool) error {
-	actualPath := strings.TrimSuffix(filePath, ".ipynb")
+	actualPath := pathutil.ToRemotePath(filePath)
 	c.cache.Invalidate(actualPath)
 
 	return c.workspaceClient.Delete(ctx, workspace.Delete{
@@ -496,8 +497,8 @@ func (c *WorkspaceFilesClient) Mkdir(ctx context.Context, dirPath string) error 
 }
 
 func (c *WorkspaceFilesClient) Rename(ctx context.Context, source_path string, destination_path string) error {
-	actualSource := strings.TrimSuffix(source_path, ".ipynb")
-	actualDest := strings.TrimSuffix(destination_path, ".ipynb")
+	actualSource := pathutil.ToRemotePath(source_path)
+	actualDest := pathutil.ToRemotePath(destination_path)
 
 	urlPath := "/api/2.0/workspace/rename"
 

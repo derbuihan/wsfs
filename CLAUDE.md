@@ -172,6 +172,7 @@ Testing is enabled through thin interfaces:
 - `cmd/wsfs/main.go` - Entry point, CLI flags, initialization
 - `internal/fuse/node.go` - WSNode struct, all FUSE operations (650+ lines)
 - `internal/databricks/client.go` - WorkspaceFilesClient with fallback logic
+- `internal/pathutil/pathutil.go` - Path conversion utilities (fusePath ↔ remotePath)
 - `internal/buffer/file_buffer.go` - FileBuffer struct (Data + Dirty flag)
 - `internal/filecache/disk_cache.go` - DiskCache with LRU/TTL eviction
 - `internal/cache/cache.go` - In-memory metadata cache with 60s TTL
@@ -183,6 +184,7 @@ Testing is enabled through thin interfaces:
 - `internal/fuse/node_test.go` - FUSE node tests (24 tests)
 - `internal/databricks/client_test.go` - Databricks client tests (8 tests)
 - `internal/metacache/cache_test.go` - Metadata cache tests
+- `internal/pathutil/pathutil_test.go` - Path conversion tests
 
 #### Integration Tests (requires .env + mounted filesystem)
 - `scripts/tests/fuse_test.sh` - Unified FUSE operations (9 sections)
@@ -325,6 +327,7 @@ When modifying code, always consider what tests need to be added or updated:
 | Metadata cache | `internal/metacache/cache_test.go` | `scripts/tests/cache_test.sh` |
 | Access control | `internal/fuse/node_test.go` | `scripts/tests/security_test.sh` |
 | Cache config | `internal/filecache/disk_cache_test.go` | `scripts/tests/cache_config_test.sh` |
+| Path conversion | `internal/pathutil/pathutil_test.go` | N/A |
 
 ## Known Limitations
 
