@@ -18,8 +18,9 @@ import (
 	"github.com/databricks/databricks-sdk-go/client"
 	"github.com/databricks/databricks-sdk-go/service/workspace"
 
-	"wsfs/internal/metacache"
 	"wsfs/internal/logging"
+	"wsfs/internal/metacache"
+	"wsfs/internal/retry"
 )
 
 // HTTP client timeout for signed URL operations
@@ -288,7 +289,8 @@ func (c *WorkspaceFilesClient) readViaSignedURL(ctx context.Context, url string,
 		req.Header.Set(k, v)
 	}
 
-	httpClient := &http.Client{Timeout: httpTimeout}
+	// Use retryable HTTP client for transient errors (429, 5xx)
+	httpClient := retry.NewHTTPClient(httpTimeout, retry.DefaultConfig())
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -375,7 +377,7 @@ func (c *WorkspaceFilesClient) writeViaNewFiles(ctx context.Context, filepath st
 		return fmt.Errorf("no signed URL returned")
 	}
 
-	// 2. Upload to signed URL with PUT
+	// 2. Upload to signed URL with PUT (with retry for transient errors)
 	signedURL := resp.SignedURLs[0]
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, signedURL.URL, bytes.NewReader(data))
 	if err != nil {
@@ -386,7 +388,8 @@ func (c *WorkspaceFilesClient) writeViaNewFiles(ctx context.Context, filepath st
 		req.Header.Set(k, v)
 	}
 
-	httpClient := &http.Client{Timeout: httpTimeout}
+	// Use retryable HTTP client for transient errors (429, 5xx)
+	httpClient := retry.NewHTTPClient(httpTimeout, retry.DefaultConfig())
 	putResp, err := httpClient.Do(req)
 	if err != nil {
 		return err
