@@ -7,23 +7,24 @@
 ## 将来対応（オプション）
 
 ### パフォーマンス改善
+
 - [ ] 書き込みの一時ファイル経由化（巨大ファイル書き込み時のメモリ使用量削減）
 - [ ] fusePath/remotePath の型安全ラッパー（コンパイル時のバグ検出）
 - [x] サイズベース API 選択戦略（5MB しきい値で実装済み）
-  - 小さいファイル (<5MB): import-file 直接送信（1 round trip）
-  - 大きいファイル (>=5MB): new-files + signed URL（クラウドストレージ直接）
-  - 背景: SDK Import/Export は 10MB 制限あり、signed URL は制限なし
 
 ### 観測性・運用性
+
 - [ ] メトリクス出力（read/write/stat/err カウンタ）
 - [ ] Prometheus 形式でのエクスポート
 - [ ] レート制御（Databricks API制限対応）
 
 ### 配布
+
 - [ ] GitHub Actions でバイナリ配布（goreleaser）
 - [ ] brew / .deb パッケージ対応
 
 ### ドキュメント
+
 - [x] docs/ 配下の整理（Workspace API仕様をまとめる）
 - [ ] README.md の簡素化
 
@@ -38,12 +39,14 @@
 ## 既知の制限事項
 
 ### 機能制限
+
 - `Statfs` は合成された固定値を返す（実際のワークスペース容量を反映しない）
 - atime-only 更新は `ENOTSUP`
 - chmod/chown は `ENOTSUP`
 - `new-files` signed URL upload は 403 を返す場合あり（フォールバックで対応）
 
 ### 利用シナリオ
+
 - **推奨**: 単一ユーザー開発用途、CI/CD、ローカルでのノートブック編集
 - **非推奨**: チーム共有サーバー、本番運用、機密データ環境
 
@@ -52,6 +55,7 @@
 ## 完了済み（参考）
 
 以下のPhaseは全て完了:
+
 - Phase R: リファクタリング（インターフェース化、テスト基盤）
 - Phase 1: 互換性強化（go-fuse インターフェース実装）
 - Phase 2: データパス強化（signed URL read/write、フォールバック）

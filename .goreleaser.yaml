@@ -1,0 +1,39 @@
+version: 2
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    main: ./cmd/wsfs
+    binary: wsfs
+    mod_timestamp: '{{ .CommitTimestamp }}'
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .ShortCommit }}
+      - -X main.date={{ .Date }}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats: ["tar.gz"]
+    name_template: 'wsfs_{{ .Os }}_{{ .Arch }}'
+
+checksum:
+  name_template: 'wsfs_SHA256SUMS'
+  algorithm: sha256
+
+snapshot:
+  version_template: '{{ .ShortCommit }}'
+
+release:
+  disable: true

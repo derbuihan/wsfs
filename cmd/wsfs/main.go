@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -23,10 +24,18 @@ import (
 	"wsfs/internal/logging"
 )
 
+// Build information (set via ldflags)
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 // Shutdown timeout for flushing dirty buffers
 const shutdownTimeout = 30 * time.Second
 
 func main() {
+	showVersion := flag.Bool("version", false, "print version and exit")
 	debug := flag.Bool("debug", false, "print debug data (equivalent to --log-level=debug)")
 	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
 	allowOther := flag.Bool("allow-other", false, "allow other users to access the mount")
@@ -38,6 +47,12 @@ func main() {
 	cacheTTL := flag.Duration("cache-ttl", 24*time.Hour, "cache TTL (e.g., 24h, 30m)")
 
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("wsfs %s (commit: %s, built: %s)\n", version, commit, date)
+		os.Exit(0)
+	}
+
 	if len(flag.Args()) < 1 {
 		log.Fatalf("Usage: %s MOUNTPOINT", os.Args[0])
 	}
