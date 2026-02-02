@@ -184,8 +184,14 @@
   - dirListTimeout (1分): ディレクトリ一覧 (Readdir)
 
 ### P5-3: テスト・CI整備
-- [ ] Docker/CI 用の安定テストシナリオを整備
-- [ ] 重大リグレッションを検出するテストを固定化
+- [x] Docker/CI 用の安定テストシナリオを整備
+  - CI ワークフローを統合（`go.yml` + `test.yml` → `test.yml`）
+  - Go バージョンを 1.22 に統一
+  - テストカバレッジ出力を追加（`-coverprofile`）
+  - race detector を有効化（`-race`）
+- [x] 重大リグレッションを検出するテストを固定化
+  - Go unit tests: 8ファイル（node, client, cache, retry, logging 等）
+  - Integration tests: `scripts/tests/` 配下（FUSE, cache, stress, config）
 - [x] `CopyToCache`, `sanitizeURL`, `sanitizeError` のユニットテスト追加
   - `internal/databricks/client_test.go`: TestSanitizeURL, TestSanitizeError, TestTruncateBody
   - `internal/filecache/disk_cache_test.go`: TestDiskCacheCopyToCache
