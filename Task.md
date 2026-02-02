@@ -161,10 +161,10 @@
 - [ ] 非推奨の使用シナリオを記載（共有サーバー、機密データ環境）
 
 ### P5-2: 運用機能
-- [ ] Graceful Shutdown の実装
-  - [ ] signal.NotifyContext でシグナルハンドリング
-  - [ ] dirty buffer の flush ポリシー策定
-  - [ ] server.Unmount() の適切な呼び出し
+- [x] Graceful Shutdown の実装
+  - [x] signal.NotifyContext でシグナルハンドリング
+  - [x] dirty buffer の flush ポリシー策定（DirtyNodeRegistry で追跡）
+  - [x] server.Unmount() の適切な呼び出し
 - [ ] ログレベル設定の追加（`--log-level` フラグ）
 - [ ] 操作ごとの context.WithTimeout 設定
 
@@ -255,9 +255,9 @@
 - `write-files` の正確なリクエストフォーマットは不明（フォールバックで対応）
 
 ### 堅牢性・信頼性
-- Graceful Shutdown がない
-  - Ctrl+C で終了時、dirty buffer がフラッシュされない可能性
-  - 改善案：`signal.NotifyContext` + `server.Unmount()` + dirty buffer flush ポリシー
+- ~~Graceful Shutdown がない~~ → P5-2 で対応済み
+  - ~~Ctrl+C で終了時、dirty buffer がフラッシュされない可能性~~
+  - signal.NotifyContext + DirtyNodeRegistry + server.Unmount() で実装
 - ~~metacache に最大サイズ制限がない（大量のファイルでメモリ消費増加の可能性）~~ → P4-5 で対応済み（10,000 エントリ上限）
 - ~~型アサーションの安全性（一部でパニックの可能性あり）~~ → P4-4 で対応済み
 - ~~キャッシュ再起動時の容量不整合~~ → P4-5 で対応済み（起動時に孤立ファイルを削除）

@@ -57,6 +57,7 @@ type WSNode struct {
 	fileInfo  databricks.WSFileInfo
 	buf       fileBuffer
 	mu        sync.Mutex
+	registry  *DirtyNodeRegistry
 }
 
 var _ = (fs.NodeGetattrer)((*WSNode)(nil))
@@ -202,6 +203,9 @@ func (n *WSNode) truncateLocked(size uint64) {
 	}
 	n.fileInfo.ObjectInfo.Size = int64(size)
 	n.buf.Dirty = true
+	if n.registry != nil {
+		n.registry.Register(n)
+	}
 }
 
 func (n *WSNode) markModifiedLocked(t time.Time) {
@@ -220,6 +224,9 @@ func (n *WSNode) flushLocked(ctx context.Context) syscall.Errno {
 		return syscall.EIO
 	}
 	n.buf.Dirty = false
+	if n.registry != nil {
+		n.registry.Unregister(n)
+	}
 
 	info, err := n.wfClient.Stat(ctx, remotePath)
 	if err != nil {
@@ -425,7 +432,7 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 		return nil, syscall.EIO
 	}
 
-	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo}
+	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo, registry: n.registry}
 	childNode.fillAttr(ctx, &out.Attr)
 
 	out.SetEntryTimeout(entryTimeoutSec)
@@ -469,6 +476,9 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 		n.fileInfo.ObjectInfo.Size = 0
 		n.markModifiedLocked(time.Now())
 		n.buf.Dirty = true
+		if n.registry != nil {
+			n.registry.Register(n)
+		}
 	} else if n.buf.Data == nil {
 		if errno := n.ensureDataLocked(ctx); errno != 0 {
 			return nil, 0, errno
@@ -561,6 +571,9 @@ func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off i
 	n.fileInfo.ObjectInfo.Size = int64(len(n.buf.Data))
 	n.markModifiedLocked(time.Now())
 	n.buf.Dirty = true
+	if n.registry != nil {
+		n.registry.Register(n)
+	}
 
 	return uint32(len(data)), 0
 }
@@ -632,7 +645,7 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 		logging.Debugf("Create: unexpected file info type for %s", childPath)
 		return nil, nil, 0, syscall.EIO
 	}
-	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo, buf: fileBuffer{Data: initialContent}}
+	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo, buf: fileBuffer{Data: initialContent}, registry: n.registry}
 	childNode.fillAttr(ctx, &out.Attr)
 
 	out.SetEntryTimeout(entryTimeoutSec)
@@ -703,7 +716,7 @@ func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 		logging.Debugf("Mkdir: unexpected file info type for %s", childPath)
 		return nil, syscall.EIO
 	}
-	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo}
+	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo, registry: n.registry}
 	childNode.fillAttr(ctx, &out.Attr)
 
 	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode), Ino: stableIno(wsInfo)})
@@ -797,7 +810,7 @@ func (n *WSNode) OnForget() {
 	n.buf.Dirty = false
 }
 
-func NewRootNode(wfClient databricks.WorkspaceFilesAPI, diskCache *filecache.DiskCache, rootPath string) (*WSNode, error) {
+func NewRootNode(wfClient databricks.WorkspaceFilesAPI, diskCache *filecache.DiskCache, rootPath string, registry *DirtyNodeRegistry) (*WSNode, error) {
 	info, err := wfClient.Stat(context.Background(), rootPath)
 
 	if err != nil {
@@ -816,5 +829,6 @@ func NewRootNode(wfClient databricks.WorkspaceFilesAPI, diskCache *filecache.Dis
 		wfClient:  wfClient,
 		diskCache: diskCache,
 		fileInfo:  wsInfo,
+		registry:  registry,
 	}, nil
 }

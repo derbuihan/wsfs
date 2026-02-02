@@ -5,7 +5,9 @@ import (
 	"flag"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	databrickssdk "github.com/databricks/databricks-sdk-go"
@@ -18,6 +20,9 @@ import (
 	wsfsfuse "wsfs/internal/fuse"
 	"wsfs/internal/logging"
 )
+
+// Shutdown timeout for flushing dirty buffers
+const shutdownTimeout = 30 * time.Second
 
 func main() {
 	debug := flag.Bool("debug", false, "print debug data")
@@ -76,8 +81,11 @@ func main() {
 		log.Fatalf("Failed to create Databricks Workspace Files Client: %v", err)
 	}
 
+	// Create dirty node registry for graceful shutdown
+	registry := wsfsfuse.NewDirtyNodeRegistry()
+
 	// Set up Root node
-	root, err := wsfsfuse.NewRootNode(wfclient, diskCache, "/")
+	root, err := wsfsfuse.NewRootNode(wfclient, diskCache, "/", registry)
 	if err != nil {
 		log.Fatalf("Failed to create root node: %v", err)
 	}
@@ -105,6 +113,35 @@ func main() {
 	}
 	logging.Debugf("Mounted Databricks workspace on %s", flag.Arg(0))
 	logging.Debugf("Press Ctrl+C to unmount")
+
+	// Signal handling for graceful shutdown
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Wait for signal in goroutine
+	go func() {
+		<-ctx.Done()
+		log.Println("Shutdown signal received, flushing dirty buffers...")
+
+		// Flush all dirty buffers with timeout
+		flushCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+
+		flushed, errors := registry.FlushAll(flushCtx)
+		if len(errors) > 0 {
+			for _, err := range errors {
+				log.Printf("Flush error: %v", err)
+			}
+		}
+		if flushed > 0 {
+			log.Printf("Flushed %d dirty buffer(s)", flushed)
+		}
+
+		// Unmount filesystem
+		if err := server.Unmount(); err != nil {
+			log.Printf("Unmount error: %v", err)
+		}
+	}()
 
 	server.Wait()
 }
