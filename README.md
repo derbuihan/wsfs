@@ -132,251 +132,58 @@ $ ./wsfs --debug --cache=true <mount-point>
 
 ## Testing
 
-wsfs includes comprehensive test suites covering FUSE operations, caching behavior, and integration with Databricks. All tests are designed to run in Docker for consistency and portability.
+wsfs includes comprehensive test suites covering FUSE operations, caching behavior, and stress testing.
 
 ### Quick Start
 
 ```bash
-# Run standard FUSE tests
-$ docker compose run --rm --build wsfs-test
+# Go unit tests (no .env required)
+go test ./...
 
-# Run comprehensive cache tests (includes all cache-related tests)
-$ docker compose run --rm --build wsfs-cache-test
+# Integration tests via Docker (Mac)
+./scripts/run_tests_docker.sh
+
+# Integration tests on Linux (requires mounted wsfs)
+./scripts/run_tests.sh /mnt/wsfs
 ```
 
 **Prerequisites:**
 - Set `DATABRICKS_HOST` and `DATABRICKS_TOKEN` in `.env` file
-- Docker with FUSE support
+- Docker with FUSE support (for Mac)
 
-### Test Suite Overview
+### Test Suites
 
-#### 1. Unit Tests (Go)
+| Suite | Script | Description |
+|-------|--------|-------------|
+| **FUSE tests** | `scripts/tests/fuse_test.sh` | File/directory operations, vim compatibility |
+| **Cache tests** | `scripts/tests/cache_test.sh` | Cache hit/miss, invalidation, TTL behavior |
+| **Stress tests** | `scripts/tests/stress_test.sh` | Concurrent access, rapid truncate, rename |
+| **Config tests** | `scripts/tests/cache_config_test.sh` | Cache disabled mode, permissions, short TTL |
 
-**Location:** `internal/filecache/disk_cache_test.go`
+### Test Options
 
 ```bash
-$ go test ./internal/filecache/...
+# Run specific test suite
+./scripts/run_tests_docker.sh --fuse-only
+./scripts/run_tests_docker.sh --cache-only
+./scripts/run_tests_docker.sh --stress-only
+
+# Skip specific tests
+./scripts/run_tests_docker.sh --skip-stress
+./scripts/run_tests_docker.sh --skip-config-test
+
+# Rebuild Docker image
+./scripts/run_tests_docker.sh --build
 ```
 
-Tests for disk cache implementation:
-- Cache entry storage and retrieval
-- TTL expiration
-- LRU eviction
-- Cache invalidation
-- Concurrent access handling
+### Debug Logging
 
-**Coverage:** 13 test cases, 100% code coverage for disk cache
-
----
-
-#### 2. Basic FUSE Operations Tests
-
-**Script:** `scripts/fuse_test.sh`
-**Docker:** `docker compose run --rm wsfs-test`
-
-Tests fundamental FUSE filesystem operations:
-
-| Test Category | Operations Tested |
-|--------------|-------------------|
-| **File Operations** | Create, read, write, append, delete |
-| **Directory Operations** | Create, list, delete (empty and non-empty) |
-| **Metadata Operations** | Stat, chmod, touch, truncate |
-| **Advanced Operations** | Rename, symlink, fsync |
-| **Vim Compatibility** | Vim save workflow (backup files, atomic writes) |
-
-**Total:** 10+ test categories
-
-**Run directly on Linux:**
 ```bash
-$ sudo apt-get install -y fuse3 vim
-$ echo 'user_allow_other' | sudo tee -a /etc/fuse.conf
-$ mkdir -p /mnt/wsfs
-$ go build -o tmp/wsfs ./cmd/wsfs
-$ ./tmp/wsfs /mnt/wsfs &
-$ ./scripts/fuse_test.sh /mnt/wsfs
-$ fusermount3 -u /mnt/wsfs
-```
-
----
-
-#### 3. Large File Tests
-
-**Script:** `scripts/large_file_test.sh`
-
-Tests handling of large files:
-- **10MB file**: Read/write/verify (always run)
-- **50MB file**: Optional (set `LARGE_FILE_TEST=1`)
-- **100MB file**: Optional (set `LARGE_FILE_TEST=2`)
-- **Streaming reads**: Chunked reading (1MB blocks)
-
-**Usage:**
-```bash
-$ ./scripts/large_file_test.sh /mnt/wsfs
-
-# Test with larger files
-$ LARGE_FILE_TEST=1 ./scripts/large_file_test.sh /mnt/wsfs  # 50MB
-$ LARGE_FILE_TEST=2 ./scripts/large_file_test.sh /mnt/wsfs  # 100MB
-```
-
-**Verification:** Uses `diff` and MD5 checksums
-
----
-
-#### 4. Cache Tests
-
-##### 4.1 Basic Cache Operations
-
-**Script:** `scripts/cache_test.sh`
-**Tests:** 9 test categories
-
-| Test | Description |
-|------|-------------|
-| **Basic Cache Hit/Miss** | First read (miss) → cache population → second read (hit) |
-| **Cache Invalidation on Write** | File modification invalidates cache |
-| **Cache Invalidation on Delete** | File deletion removes cache entry |
-| **Cache Invalidation on Rename** | Old cache invalidated, new path starts fresh |
-| **Cache Persistence** | Multiple files cached and retrieved correctly |
-| **Large File Caching** | 1MB file cached with hash verification |
-| **Concurrent File Access** | 10 parallel reads without corruption |
-| **Cache with Truncate** | Truncation updates cache correctly |
-| **Cache Directory Operations** | Directory deletion cleans up cached files |
-
-**Usage:**
-```bash
-$ ./scripts/cache_test.sh /mnt/wsfs [cache_dir] [log_file]
-```
-
----
-
-##### 4.2 Cache Synchronization Tests
-
-**Script:** `scripts/cache_sync_test.sh`
-**Tests:** 4 test categories
-
-| Test | Description |
-|------|-------------|
-| **Detect Remote File Modification** | Detects when remote file changes via modTime comparison |
-| **Cache Behavior After Flush** | Writes are properly flushed and readable |
-| **Multiple File Modifications** | Batch remote modifications are detected |
-| **Cache Behavior with Touch** | Touch updates mtime without changing content |
-
-**Usage:**
-```bash
-$ export DATABRICKS_HOST=https://your-workspace.databricks.com
-$ export DATABRICKS_TOKEN=your-token
-$ ./scripts/cache_sync_test.sh /mnt/wsfs
-```
-
-**Note:** Modifies files via Databricks API to simulate remote changes
-
----
-
-##### 4.3 Databricks CLI Verification Tests
-
-**Script:** `scripts/databricks_cli_verification_test.sh`
-**Tests:** 8 verification scenarios
-
-Verifies wsfs operations against official Databricks CLI to ensure correct synchronization:
-
-| Test | Verification Method |
-|------|---------------------|
-| **File Creation** | `databricks workspace export` matches wsfs content |
-| **File Modification** | CLI shows updated content after wsfs write |
-| **File Rename** | Old path doesn't exist, new path exists via CLI |
-| **File Delete** | CLI confirms file no longer exists |
-| **Directory Operations** | `databricks workspace list` shows correct structure |
-| **Directory Rename** | CLI reflects renamed directory |
-| **Directory Delete** | CLI confirms directory removal |
-| **Large File (1MB)** | MD5 checksum matches between wsfs and CLI download |
-
-**Requirements:**
-- Databricks CLI installed in Docker image
-- Valid `DATABRICKS_HOST` and `DATABRICKS_TOKEN`
-
-**Usage:**
-```bash
-$ export DATABRICKS_HOST=https://your-workspace.databricks.com
-$ export DATABRICKS_TOKEN=your-token
-$ ./scripts/databricks_cli_verification_test.sh /mnt/wsfs
-```
-
-**Purpose:** Ensures wsfs maintains 100% compatibility with official Databricks workspace state
-
----
-
-##### 4.4 Comprehensive Cache Integration Tests
-
-**Script:** `scripts/docker_cache_test.sh`
-**Docker:** `docker compose run --rm wsfs-cache-test`
-
-Runs all cache tests across multiple configurations:
-
-| Configuration | Settings | Tests Run |
-|--------------|----------|-----------|
-| **Test 1: Default Cache** | 10GB size, 24h TTL | All 3 cache test suites |
-| **Test 2: Cache Disabled** | No caching | Basic operations only |
-| **Test 3: Short TTL** | 5 second TTL | TTL expiration behavior |
-| **Test 4: Small Cache** | 1MB size | LRU eviction with 5×300KB files |
-
-**Total execution time:** ~2-3 minutes
-
-**What it verifies:**
-- ✅ Cache hit/miss operations (9 tests)
-- ✅ Cache invalidation on write/delete/rename
-- ✅ Remote file modification detection (4 tests)
-- ✅ Databricks CLI compatibility (8 tests)
-- ✅ TTL-based expiration
-- ✅ LRU-based eviction
-- ✅ Cache disable mode
-
----
-
-### Test Results & Logs
-
-**Cache Statistics:**
-```bash
-# View cache directory contents
-$ ls -lh /tmp/wsfs-cache/
-
-# Check cache size
-$ du -sh /tmp/wsfs-cache/
-
-# Count cache entries
-$ find /tmp/wsfs-cache -type f | wc -l
-```
-
-**Debug Logging:**
-```bash
-$ ./wsfs --debug --cache=true /mnt/wsfs
+./wsfs --debug --cache=true /mnt/wsfs
 # Look for:
 # - "Cache hit for /path/to/file"
 # - "Cache miss for /path/to/file, fetching from remote"
-# - "Cached file /path/to/file (1234 bytes)"
-# - "Updated cache after flush for /path/to/file"
 ```
-
----
-
-### Test Documentation
-
-For detailed test documentation, see:
-- [`docs/cache-testing.md`](docs/cache-testing.md) - Cache testing methodology
-- [`docs/behavior.md`](docs/behavior.md) - Expected FUSE behavior
-- [`docs/databricks-api-survey.md`](docs/databricks-api-survey.md) - API verification details
-
----
-
-### Continuous Integration
-
-All tests are designed to run in CI environments:
-- Docker-based execution for consistency
-- No manual intervention required
-- Clear pass/fail indicators
-- Detailed error reporting
-
-**Exit codes:**
-- `0` - All tests passed
-- `1` - Test failure (with specific error message)
 
 ## License
 
