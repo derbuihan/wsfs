@@ -466,6 +466,73 @@ func TestDiskCacheGetCachedPaths(t *testing.T) {
 	}
 }
 
+func TestLoadExistingEntries_CleansOrphanedFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create some orphaned files in the cache directory
+	orphanedFiles := []string{"abc123", "def456", "ghi789"}
+	var totalOrphanedSize int64
+	for i, name := range orphanedFiles {
+		filePath := filepath.Join(tmpDir, name)
+		data := make([]byte, (i+1)*100) // Different sizes
+		if err := os.WriteFile(filePath, data, 0644); err != nil {
+			t.Fatalf("Failed to create orphaned file: %v", err)
+		}
+		totalOrphanedSize += int64(len(data))
+	}
+
+	// Verify orphaned files exist
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to read dir: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Errorf("Expected 3 orphaned files, got %d", len(entries))
+	}
+
+	// Create a new cache - should clean up orphaned files
+	cache, err := NewDiskCache(tmpDir, 1024*1024, 1*time.Hour)
+	if err != nil {
+		t.Fatalf("NewDiskCache failed: %v", err)
+	}
+
+	// Verify orphaned files were deleted
+	entries, err = os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to read dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("Expected 0 files after cleanup, got %d", len(entries))
+	}
+
+	// Verify cache stats are consistent (should be empty)
+	numEntries, totalSize := cache.GetStats()
+	if numEntries != 0 {
+		t.Errorf("Expected 0 entries, got %d", numEntries)
+	}
+	if totalSize != 0 {
+		t.Errorf("Expected size 0, got %d", totalSize)
+	}
+
+	// Verify cache still works normally after cleanup
+	testData := []byte("new data")
+	remotePath := "/test.txt"
+	modTime := time.Now()
+
+	localPath, err := cache.Set(remotePath, testData, modTime)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	cachedPath, found := cache.Get(remotePath, modTime)
+	if !found {
+		t.Error("Expected cache hit")
+	}
+	if cachedPath != localPath {
+		t.Errorf("Expected path %s, got %s", localPath, cachedPath)
+	}
+}
+
 func BenchmarkDiskCacheSet(b *testing.B) {
 	tmpDir := b.TempDir()
 	cache, err := NewDiskCache(tmpDir, 1024*1024*1024, 1*time.Hour)

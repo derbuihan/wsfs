@@ -308,6 +308,101 @@ func TestCacheTTLUpdate(t *testing.T) {
 	}
 }
 
+// TestCacheMaxEntries tests that cache evicts oldest entries when at capacity
+func TestCacheMaxEntries(t *testing.T) {
+	// Create cache with max 5 entries
+	c := NewCacheWithMaxEntries(10*time.Second, 5)
+
+	// Add 5 entries with staggered expiration times
+	for i := 0; i < 5; i++ {
+		path := "/file_" + string(rune('a'+i)) + ".txt"
+		info := newMockFileInfo(path, int64(i*100), false)
+		c.Set(path, info)
+		time.Sleep(10 * time.Millisecond) // Ensure different expiration times
+	}
+
+	// Verify all 5 entries exist
+	for i := 0; i < 5; i++ {
+		path := "/file_" + string(rune('a'+i)) + ".txt"
+		_, found := c.Get(path)
+		if !found {
+			t.Errorf("Expected to find %s before eviction", path)
+		}
+	}
+
+	// Add 6th entry - should evict the oldest (/file_a.txt)
+	info6 := newMockFileInfo("f.txt", 500, false)
+	c.Set("/file_f.txt", info6)
+
+	// /file_a.txt should be evicted (oldest expiration)
+	_, found := c.Get("/file_a.txt")
+	if found {
+		t.Error("Expected oldest entry /file_a.txt to be evicted")
+	}
+
+	// Other entries should still exist
+	for i := 1; i < 5; i++ {
+		path := "/file_" + string(rune('a'+i)) + ".txt"
+		_, found := c.Get(path)
+		if !found {
+			t.Errorf("Expected %s to still exist after eviction", path)
+		}
+	}
+
+	// New entry should exist
+	_, found = c.Get("/file_f.txt")
+	if !found {
+		t.Error("Expected new entry /file_f.txt to exist")
+	}
+}
+
+// TestCacheMaxEntriesUpdate tests that updating existing entry doesn't trigger eviction
+func TestCacheMaxEntriesUpdate(t *testing.T) {
+	// Create cache with max 3 entries
+	c := NewCacheWithMaxEntries(10*time.Second, 3)
+
+	// Add 3 entries
+	for i := 0; i < 3; i++ {
+		path := "/file_" + string(rune('a'+i)) + ".txt"
+		info := newMockFileInfo(path, int64(i*100), false)
+		c.Set(path, info)
+	}
+
+	// Update existing entry - should NOT evict anything
+	updatedInfo := newMockFileInfo("a.txt", 999, false)
+	c.Set("/file_a.txt", updatedInfo)
+
+	// All entries should still exist
+	for i := 0; i < 3; i++ {
+		path := "/file_" + string(rune('a'+i)) + ".txt"
+		_, found := c.Get(path)
+		if !found {
+			t.Errorf("Expected %s to still exist after update", path)
+		}
+	}
+}
+
+// TestNewCacheWithMaxEntriesDefaults tests that invalid maxEntries uses default
+func TestNewCacheWithMaxEntriesDefaults(t *testing.T) {
+	// Zero should use default
+	c1 := NewCacheWithMaxEntries(10*time.Second, 0)
+	if c1.maxEntries != defaultMaxEntries {
+		t.Errorf("Expected default maxEntries %d, got %d", defaultMaxEntries, c1.maxEntries)
+	}
+
+	// Negative should use default
+	c2 := NewCacheWithMaxEntries(10*time.Second, -10)
+	if c2.maxEntries != defaultMaxEntries {
+		t.Errorf("Expected default maxEntries %d, got %d", defaultMaxEntries, c2.maxEntries)
+	}
+
+	// Positive should use the provided value
+	c3 := NewCacheWithMaxEntries(10*time.Second, 100)
+	if c3.maxEntries != 100 {
+		t.Errorf("Expected maxEntries 100, got %d", c3.maxEntries)
+	}
+}
+
 // BenchmarkCacheGet benchmarks cache Get operations
 func BenchmarkCacheGet(b *testing.B) {
 	c := NewCache(10 * time.Second)

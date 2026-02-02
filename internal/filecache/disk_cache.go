@@ -307,14 +307,19 @@ func (c *DiskCache) generateLocalPath(remotePath string) string {
 	return filepath.Join(c.cacheDir, hashStr)
 }
 
-// loadExistingEntries scans the cache directory and loads existing cache files
+// loadExistingEntries scans the cache directory and removes orphaned files
+// Since we can't recover remotePath from the SHA256 hash filename, we delete
+// all existing cache files on startup to ensure totalSize and entries map
+// stay consistent.
 func (c *DiskCache) loadExistingEntries() error {
 	entries, err := os.ReadDir(c.cacheDir)
 	if err != nil {
 		return err
 	}
 
-	now := time.Now()
+	var cleanedCount int
+	var cleanedSize int64
+
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -323,18 +328,21 @@ func (c *DiskCache) loadExistingEntries() error {
 		fullPath := filepath.Join(c.cacheDir, entry.Name())
 		info, err := entry.Info()
 		if err != nil {
+			os.Remove(fullPath)
+			cleanedCount++
 			continue
 		}
 
-		// Check if file is expired
-		if now.Sub(info.ModTime()) > c.ttl {
-			os.Remove(fullPath) // Clean up expired file
-			continue
-		}
+		// We can't recover remotePath from hash, so delete orphaned files
+		// This ensures totalSize and entries map stay consistent
+		cleanedSize += info.Size()
+		os.Remove(fullPath)
+		cleanedCount++
+	}
 
-		// We can't recover the remote path from the hash, so we'll just track size
-		// These entries will be overwritten when accessed
-		c.totalSize += info.Size()
+	if cleanedCount > 0 {
+		fmt.Fprintf(os.Stderr, "Cache cleanup: removed %d orphaned files (%.2f MB)\n",
+			cleanedCount, float64(cleanedSize)/(1024*1024))
 	}
 
 	return nil

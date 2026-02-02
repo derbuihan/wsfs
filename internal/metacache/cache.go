@@ -7,6 +7,9 @@ import (
 	"time"
 )
 
+// defaultMaxEntries is the default maximum number of entries in the cache
+const defaultMaxEntries = 10000
+
 type negativeCacheEntry struct {
 	fs.FileInfo
 }
@@ -19,15 +22,29 @@ type CacheEntry struct {
 }
 
 type Cache struct {
-	entries  map[string]*CacheEntry
-	cacheTTL time.Duration
-	mu       sync.Mutex
+	entries    map[string]*CacheEntry
+	cacheTTL   time.Duration
+	maxEntries int
+	mu         sync.Mutex
 }
 
 func NewCache(ttl time.Duration) *Cache {
 	return &Cache{
-		entries:  make(map[string]*CacheEntry),
-		cacheTTL: ttl,
+		entries:    make(map[string]*CacheEntry),
+		cacheTTL:   ttl,
+		maxEntries: defaultMaxEntries,
+	}
+}
+
+// NewCacheWithMaxEntries creates a cache with a custom max entries limit
+func NewCacheWithMaxEntries(ttl time.Duration, maxEntries int) *Cache {
+	if maxEntries <= 0 {
+		maxEntries = defaultMaxEntries
+	}
+	return &Cache{
+		entries:    make(map[string]*CacheEntry),
+		cacheTTL:   ttl,
+		maxEntries: maxEntries,
 	}
 }
 
@@ -56,6 +73,14 @@ func (c *Cache) Set(path string, info fs.FileInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Check if entry already exists (update case - no eviction needed)
+	if _, exists := c.entries[path]; !exists {
+		// Evict oldest entry if at capacity
+		if len(c.entries) >= c.maxEntries {
+			c.evictOldestLocked()
+		}
+	}
+
 	var entryInfo fs.FileInfo
 	if info == nil {
 		entryInfo = negativeEntry
@@ -65,6 +90,30 @@ func (c *Cache) Set(path string, info fs.FileInfo) {
 
 	expiration := time.Now().Add(c.cacheTTL)
 	c.entries[path] = &CacheEntry{info: entryInfo, expiration: expiration}
+}
+
+// evictOldestLocked removes the entry with the earliest expiration time
+// Must be called with lock held
+func (c *Cache) evictOldestLocked() {
+	if len(c.entries) == 0 {
+		return
+	}
+
+	var oldestPath string
+	var oldestExp time.Time
+	first := true
+
+	for path, entry := range c.entries {
+		if first || entry.expiration.Before(oldestExp) {
+			oldestPath = path
+			oldestExp = entry.expiration
+			first = false
+		}
+	}
+
+	if oldestPath != "" {
+		delete(c.entries, oldestPath)
+	}
 }
 
 func (c *Cache) Invalidate(filePath string) {
