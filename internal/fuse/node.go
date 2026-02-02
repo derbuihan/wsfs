@@ -2,8 +2,10 @@ package fuse
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
+	iofs "io/fs"
 	"os"
 	"path"
 	"strings"
@@ -171,6 +173,9 @@ func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
 	data, err := n.wfClient.ReadAll(ctx, remotePath)
 	if err != nil {
 		logging.Debugf("Failed to read file %s: %v", remotePath, err)
+		if errors.Is(err, iofs.ErrNotExist) {
+			return syscall.ENOENT
+		}
 		return syscall.EIO
 	}
 	n.buf.Data = data
@@ -220,7 +225,7 @@ func (n *WSNode) flushLocked(ctx context.Context) syscall.Errno {
 	remotePath := n.Path()
 	err := n.wfClient.Write(ctx, remotePath, n.buf.Data)
 	if err != nil {
-		logging.Debugf("Error writing back on Flush: %v", err)
+		logging.Warnf("Error writing back on Flush for %s: %v", remotePath, err)
 		return syscall.EIO
 	}
 	n.buf.Dirty = false
@@ -230,12 +235,12 @@ func (n *WSNode) flushLocked(ctx context.Context) syscall.Errno {
 
 	info, err := n.wfClient.Stat(ctx, remotePath)
 	if err != nil {
-		logging.Debugf("Error refreshing file info after Flush: %v", err)
+		logging.Warnf("Error refreshing file info after Flush for %s: %v", remotePath, err)
 		return 0
 	}
 	wsInfo, ok := info.(databricks.WSFileInfo)
 	if !ok {
-		logging.Debugf("Unexpected file info type after Flush for %s", remotePath)
+		logging.Warnf("Unexpected file info type after Flush for %s", remotePath)
 		return 0
 	}
 	n.fileInfo = wsInfo
@@ -389,6 +394,7 @@ func (n *WSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 
 	entries, err := n.wfClient.ReadDir(ctx, n.Path())
 	if err != nil {
+		logging.Warnf("Error reading directory %s: %v", n.Path(), err)
 		return nil, syscall.EIO
 	}
 
@@ -418,7 +424,7 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	childPath, err := validateChildPath(n.Path(), name)
 	if err != nil {
 		logging.Debugf("Lookup: invalid path: %v", err)
-		return nil, syscall.ENOENT
+		return nil, syscall.EINVAL
 	}
 
 	info, err := n.wfClient.Stat(ctx, childPath)
@@ -630,13 +636,13 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 
 	err = n.wfClient.Write(ctx, childPath, initialContent)
 	if err != nil {
-		logging.Debugf("Error creating file on databricks: %v", err)
+		logging.Warnf("Error creating file %s: %v", childPath, err)
 		return nil, nil, 0, syscall.EIO
 	}
 
 	info, err := n.wfClient.Stat(ctx, childPath)
 	if err != nil {
-		logging.Debugf("Error stating new file: %v", err)
+		logging.Warnf("Error stating new file %s: %v", childPath, err)
 		return nil, nil, 0, syscall.EIO
 	}
 
@@ -675,7 +681,7 @@ func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
 
 	err = n.wfClient.Delete(ctx, childPath, false)
 	if err != nil {
-		logging.Debugf("Error deleting file on databricks: %v", err)
+		logging.Warnf("Error deleting file %s: %v", childPath, err)
 		return syscall.EIO
 	}
 
@@ -701,13 +707,13 @@ func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 
 	err = n.wfClient.Mkdir(ctx, childPath)
 	if err != nil {
-		logging.Debugf("Error creating directory on databricks: %v", err)
+		logging.Warnf("Error creating directory %s: %v", childPath, err)
 		return nil, syscall.EIO
 	}
 
 	info, err := n.wfClient.Stat(ctx, childPath)
 	if err != nil {
-		logging.Debugf("Error stating new directory: %v", err)
+		logging.Warnf("Error stating new directory %s: %v", childPath, err)
 		return nil, syscall.EIO
 	}
 
@@ -742,7 +748,7 @@ func (n *WSNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 	err = n.wfClient.Delete(ctx, childPath, false)
 	if err != nil {
-		logging.Debugf("Error deleting directory on databricks: %v", err)
+		logging.Warnf("Error deleting directory %s: %v", childPath, err)
 		return syscall.EIO
 	}
 
@@ -772,7 +778,7 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 
 	err = n.wfClient.Rename(ctx, oldPath, newPath)
 	if err != nil {
-		logging.Debugf("Failed to rename %s to %s: %v", oldPath, newPath, err)
+		logging.Warnf("Error renaming %s to %s: %v", oldPath, newPath, err)
 		return syscall.EIO
 	}
 

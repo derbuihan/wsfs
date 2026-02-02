@@ -122,8 +122,12 @@
   - 最大5回、指数バックオフ（1s→2s→4s→8s→16s）、Retry-Afterヘッダー対応
 - [x] HTTPタイムアウトの見直し（5分 → 2分に調整）
 - [x] エラーメッセージから機密情報を除去（sanitizeError/truncateBody関数を追加）
-- [ ] errnoマッピングの整理（EACCES/ENOENT/EINVAL/EIO の使い分けポリシー策定）
-- [ ] エラー握りつぶしの修正（flushLocked等で失敗時もログ出力）
+- [x] errnoマッピングの整理（EACCES/ENOENT/EINVAL/EIO の使い分けポリシー策定）
+  - `Lookup()` の無効パスエラーを `EINVAL` に統一（他の操作と一貫性）
+  - `ensureDataLocked()` で `fs.ErrNotExist` を `ENOENT` にマッピング
+- [x] エラー握りつぶしの修正（flushLocked等で失敗時もログ出力）
+  - 重要なエラー（Write/Delete/Mkdir/Rename失敗）を `Warnf` でログ出力
+  - `flushLocked()` の Stat 失敗を `Warnf` でログ出力
 
 ### P4-3: セキュリティ強化
 - [ ] `Access()` の実装改善（UID/GIDベースのアクセス制御）
@@ -266,10 +270,10 @@
 - ~~metacache に最大サイズ制限がない（大量のファイルでメモリ消費増加の可能性）~~ → P4-5 で対応済み（10,000 エントリ上限）
 - ~~型アサーションの安全性（一部でパニックの可能性あり）~~ → P4-4 で対応済み
 - ~~キャッシュ再起動時の容量不整合~~ → P4-5 で対応済み（起動時に孤立ファイルを削除）
-- エラーの握りつぶし・誤ったerrnoマッピング
-  - `flushLocked()` で `Stat` 更新失敗しても成功扱い
-  - `validateChildPath` エラーを `ENOENT` にしている（`EINVAL` が適切な場面も）
-  - `ensureDataLocked()` は `ReadAll` 失敗を `EIO` へ丸める（原因切り分け不可）
+- ~~エラーの握りつぶし・誤ったerrnoマッピング~~ → P4-2 で対応済み
+  - ~~`flushLocked()` で `Stat` 更新失敗しても成功扱い~~ → `Warnf` でログ出力
+  - ~~`validateChildPath` エラーを `ENOENT` にしている~~ → `Lookup()` で `EINVAL` に修正
+  - ~~`ensureDataLocked()` は `ReadAll` 失敗を `EIO` へ丸める~~ → `fs.ErrNotExist` は `ENOENT` にマッピング
 
 ### プロダクト運用
 - ~~リトライ/バックオフ戦略がない~~ → P4-2 で対応済み（signed URL操作で429/5xxに対する指数バックオフリトライ）
