@@ -444,22 +444,63 @@ func TestWSNodeGetattrDirectory(t *testing.T) {
 	}
 }
 
-// TestWSNodeAccess tests that Access always returns 0 (allow all)
+// TestWSNodeAccess tests Access without restriction (allow all)
 func TestWSNodeAccess(t *testing.T) {
 	n := &WSNode{
 		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
 			ObjectType: workspace.ObjectTypeFile,
 			Path:       "/test.txt",
 		}},
+		restrictAccess: false, // No access control
 	}
 
-	// Test various access masks
+	// Test various access masks - all should succeed
 	masks := []uint32{0, 1, 2, 4, 7}
 	for _, mask := range masks {
 		errno := n.Access(context.Background(), mask)
 		if errno != 0 {
 			t.Errorf("Access(mask=%d) returned errno %d, expected 0", mask, errno)
 		}
+	}
+}
+
+// TestWSNodeAccessRestricted tests Access with UID-based restriction
+func TestWSNodeAccessRestricted(t *testing.T) {
+	n := &WSNode{
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+		}},
+		ownerUid:       1000,
+		restrictAccess: true, // Access control enabled
+	}
+
+	// Without FUSE context, access should be denied
+	// (context.Background() doesn't have fuse.Caller)
+	errno := n.Access(context.Background(), 0)
+	if errno != syscall.EACCES {
+		t.Errorf("Access with restricted mode but no FUSE context should return EACCES, got %d", errno)
+	}
+}
+
+// TestWSNodeAccessRestrictedInheritance tests that child nodes inherit access settings
+func TestWSNodeAccessRestrictedInheritance(t *testing.T) {
+	parent := &WSNode{
+		ownerUid:       1000,
+		restrictAccess: true,
+	}
+
+	// Simulate child node creation pattern
+	child := &WSNode{
+		ownerUid:       parent.ownerUid,
+		restrictAccess: parent.restrictAccess,
+	}
+
+	if child.ownerUid != parent.ownerUid {
+		t.Errorf("Child ownerUid %d != parent ownerUid %d", child.ownerUid, parent.ownerUid)
+	}
+	if child.restrictAccess != parent.restrictAccess {
+		t.Errorf("Child restrictAccess %v != parent restrictAccess %v", child.restrictAccess, parent.restrictAccess)
 	}
 }
 

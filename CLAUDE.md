@@ -61,23 +61,27 @@ go test ./internal/databricks/...
 Set `DATABRICKS_HOST` and `DATABRICKS_TOKEN` in `.env` file.
 
 ```bash
-# Linux: Run all integration tests
-./scripts/run_tests.sh /mnt/wsfs
-
-# Linux: Run specific test suite
-./scripts/run_tests.sh /mnt/wsfs --fuse-only
-./scripts/run_tests.sh /mnt/wsfs --cache-only
-
-# Mac: Run via Docker (recommended)
+# Mac/Linux: Run via Docker (recommended)
 ./scripts/run_tests_docker.sh
 
-# Mac: Run with rebuild
+# Mac/Linux: Run with rebuild
 ./scripts/run_tests_docker.sh --build
 
-# Mac: Run specific test suite
+# Mac/Linux: Run specific test suite
 ./scripts/run_tests_docker.sh --fuse-only
 ./scripts/run_tests_docker.sh --cache-only
+./scripts/run_tests_docker.sh --security-only
+./scripts/run_tests_docker.sh --config-only
+
+# Linux only: Run directly on mounted wsfs (advanced)
+./scripts/run_tests.sh /mnt/wsfs
+./scripts/run_tests.sh /mnt/wsfs --fuse-only
+./scripts/run_tests.sh /mnt/wsfs --config-only --wsfs-binary=/path/to/wsfs
 ```
+
+**Test Architecture:**
+- `run_tests_docker.sh`: Docker wrapper that handles mounting and calls `run_tests.sh`
+- `run_tests.sh`: Main test runner that executes test scripts on a mounted filesystem
 
 ## Architecture Overview
 
@@ -188,8 +192,11 @@ Testing is enabled through thin interfaces:
 - `scripts/tests/cache_test.sh` - Unified cache tests (5 sections)
   - Basic cache operations, Cache invalidation, Remote sync
   - TTL/LRU behavior, Cache configuration tests
-- `scripts/run_tests.sh` - Main test runner (Linux/Docker)
-- `scripts/run_tests_docker.sh` - Docker-based test runner for Mac
+- `scripts/tests/stress_test.sh` - Stress tests for concurrent access
+- `scripts/tests/security_test.sh` - UID-based access control tests
+- `scripts/tests/cache_config_test.sh` - Cache configuration tests (disabled mode, permissions, TTL)
+- `scripts/run_tests.sh` - Main test runner for mounted filesystem
+- `scripts/run_tests_docker.sh` - Docker wrapper (handles mounting, calls run_tests.sh)
 
 #### Test Helpers
 - `scripts/tests/lib/test_helpers.sh` - Cross-platform (Linux/Mac) test utilities
@@ -316,11 +323,13 @@ When modifying code, always consider what tests need to be added or updated:
 | Databricks API | `internal/databricks/client_test.go` | `scripts/tests/fuse_test.sh` |
 | Disk cache | `internal/filecache/disk_cache_test.go` | `scripts/tests/cache_test.sh` |
 | Metadata cache | `internal/metacache/cache_test.go` | `scripts/tests/cache_test.sh` |
+| Access control | `internal/fuse/node_test.go` | `scripts/tests/security_test.sh` |
+| Cache config | `internal/filecache/disk_cache_test.go` | `scripts/tests/cache_config_test.sh` |
 
 ## Known Limitations
 
 From [README.md](README.md:20-27):
-- Permissions are not enforced; `Access` currently allows all callers
+- `Access` enforces UID-based restriction only when `--allow-other` is enabled
 - `Statfs` returns synthetic but stable values
 - atime-only updates return `ENOTSUP`
 - chmod/chown return `ENOTSUP`

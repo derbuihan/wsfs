@@ -64,14 +64,22 @@ type fileBuffer struct {
 	Dirty bool
 }
 
+// NodeConfig holds configuration for access control.
+type NodeConfig struct {
+	OwnerUid       uint32 // UID of the user who mounted the filesystem
+	RestrictAccess bool   // Whether to enforce UID-based access control
+}
+
 type WSNode struct {
 	fs.Inode
-	wfClient  databricks.WorkspaceFilesAPI
-	diskCache *filecache.DiskCache
-	fileInfo  databricks.WSFileInfo
-	buf       fileBuffer
-	mu        sync.Mutex
-	registry  *DirtyNodeRegistry
+	wfClient       databricks.WorkspaceFilesAPI
+	diskCache      *filecache.DiskCache
+	fileInfo       databricks.WSFileInfo
+	buf            fileBuffer
+	mu             sync.Mutex
+	registry       *DirtyNodeRegistry
+	ownerUid       uint32 // UID of the mount owner
+	restrictAccess bool   // Enforce access control when true
 }
 
 var _ = (fs.NodeGetattrer)((*WSNode)(nil))
@@ -318,6 +326,20 @@ func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 
 func (n *WSNode) Access(ctx context.Context, mask uint32) syscall.Errno {
 	logging.Debugf("Access called on path: %s (mask: %d)", n.Path(), mask)
+
+	// Enforce UID-based access control when restrictAccess is enabled
+	if n.restrictAccess {
+		caller, ok := fuse.FromContext(ctx)
+		if !ok {
+			logging.Warnf("Access: failed to get caller context for %s", n.Path())
+			return syscall.EACCES
+		}
+		if caller.Uid != n.ownerUid {
+			logging.Debugf("Access denied: caller UID %d != owner UID %d for %s", caller.Uid, n.ownerUid, n.Path())
+			return syscall.EACCES
+		}
+	}
+
 	return 0
 }
 
@@ -460,7 +482,14 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 		return nil, syscall.EIO
 	}
 
-	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo, registry: n.registry}
+	childNode := &WSNode{
+		wfClient:       n.wfClient,
+		diskCache:      n.diskCache,
+		fileInfo:       wsInfo,
+		registry:       n.registry,
+		ownerUid:       n.ownerUid,
+		restrictAccess: n.restrictAccess,
+	}
 	childNode.fillAttr(ctx, &out.Attr)
 
 	out.SetEntryTimeout(entryTimeoutSec)
@@ -673,7 +702,15 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 		logging.Debugf("Create: unexpected file info type for %s", childPath)
 		return nil, nil, 0, syscall.EIO
 	}
-	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo, buf: fileBuffer{Data: initialContent}, registry: n.registry}
+	childNode := &WSNode{
+		wfClient:       n.wfClient,
+		diskCache:      n.diskCache,
+		fileInfo:       wsInfo,
+		buf:            fileBuffer{Data: initialContent},
+		registry:       n.registry,
+		ownerUid:       n.ownerUid,
+		restrictAccess: n.restrictAccess,
+	}
 	childNode.fillAttr(ctx, &out.Attr)
 
 	out.SetEntryTimeout(entryTimeoutSec)
@@ -750,7 +787,14 @@ func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 		logging.Debugf("Mkdir: unexpected file info type for %s", childPath)
 		return nil, syscall.EIO
 	}
-	childNode := &WSNode{wfClient: n.wfClient, diskCache: n.diskCache, fileInfo: wsInfo, registry: n.registry}
+	childNode := &WSNode{
+		wfClient:       n.wfClient,
+		diskCache:      n.diskCache,
+		fileInfo:       wsInfo,
+		registry:       n.registry,
+		ownerUid:       n.ownerUid,
+		restrictAccess: n.restrictAccess,
+	}
 	childNode.fillAttr(ctx, &out.Attr)
 
 	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode), Ino: stableIno(wsInfo)})
@@ -851,7 +895,7 @@ func (n *WSNode) OnForget() {
 	n.buf.Dirty = false
 }
 
-func NewRootNode(wfClient databricks.WorkspaceFilesAPI, diskCache *filecache.DiskCache, rootPath string, registry *DirtyNodeRegistry) (*WSNode, error) {
+func NewRootNode(wfClient databricks.WorkspaceFilesAPI, diskCache *filecache.DiskCache, rootPath string, registry *DirtyNodeRegistry, config *NodeConfig) (*WSNode, error) {
 	info, err := wfClient.Stat(context.Background(), rootPath)
 
 	if err != nil {
@@ -866,10 +910,18 @@ func NewRootNode(wfClient databricks.WorkspaceFilesAPI, diskCache *filecache.Dis
 		return nil, syscall.ENOTDIR
 	}
 
-	return &WSNode{
+	node := &WSNode{
 		wfClient:  wfClient,
 		diskCache: diskCache,
 		fileInfo:  wsInfo,
 		registry:  registry,
-	}, nil
+	}
+
+	// Apply access control configuration
+	if config != nil {
+		node.ownerUid = config.OwnerUid
+		node.restrictAccess = config.RestrictAccess
+	}
+
+	return node, nil
 }

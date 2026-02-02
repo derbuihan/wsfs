@@ -6,7 +6,9 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -91,8 +93,28 @@ func main() {
 	// Create dirty node registry for graceful shutdown
 	registry := wsfsfuse.NewDirtyNodeRegistry()
 
+	// Get current user's UID for access control
+	currentUser, err := user.Current()
+	if err != nil {
+		log.Fatalf("Failed to get current user: %v", err)
+	}
+	ownerUid, err := strconv.ParseUint(currentUser.Uid, 10, 32)
+	if err != nil {
+		log.Fatalf("Failed to parse UID: %v", err)
+	}
+
+	// Create node config for access control
+	// When --allow-other is enabled, restrict access to mount owner only
+	nodeConfig := &wsfsfuse.NodeConfig{
+		OwnerUid:       uint32(ownerUid),
+		RestrictAccess: *allowOther,
+	}
+	if *allowOther {
+		logging.Infof("Access control enabled: only UID %d can access the mount", ownerUid)
+	}
+
 	// Set up Root node
-	root, err := wsfsfuse.NewRootNode(wfclient, diskCache, "/", registry)
+	root, err := wsfsfuse.NewRootNode(wfclient, diskCache, "/", registry, nodeConfig)
 	if err != nil {
 		log.Fatalf("Failed to create root node: %v", err)
 	}
