@@ -46,6 +46,18 @@ const (
 	fileNlink = 1
 )
 
+// Operation timeouts for API calls
+const (
+	// dataOpTimeout is used for read/write operations that may involve large files
+	dataOpTimeout = 2 * time.Minute
+
+	// metadataOpTimeout is used for stat, delete, mkdir, rename operations
+	metadataOpTimeout = 30 * time.Second
+
+	// dirListTimeout is used for directory listing operations
+	dirListTimeout = 1 * time.Minute
+)
+
 // fileBuffer holds in-memory file data and dirty state.
 type fileBuffer struct {
 	Data  []byte
@@ -170,7 +182,9 @@ func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
 
 	// Cache miss or disabled - read from remote
 	logging.Debugf("Cache miss for %s, fetching from remote", remotePath)
-	data, err := n.wfClient.ReadAll(ctx, remotePath)
+	readCtx, cancel := context.WithTimeout(ctx, dataOpTimeout)
+	defer cancel()
+	data, err := n.wfClient.ReadAll(readCtx, remotePath)
 	if err != nil {
 		logging.Debugf("Failed to read file %s: %v", remotePath, err)
 		if errors.Is(err, iofs.ErrNotExist) {
@@ -222,8 +236,12 @@ func (n *WSNode) flushLocked(ctx context.Context) syscall.Errno {
 		return 0
 	}
 
+	// Apply timeout for write and stat operations
+	opCtx, cancel := context.WithTimeout(ctx, dataOpTimeout)
+	defer cancel()
+
 	remotePath := n.Path()
-	err := n.wfClient.Write(ctx, remotePath, n.buf.Data)
+	err := n.wfClient.Write(opCtx, remotePath, n.buf.Data)
 	if err != nil {
 		logging.Warnf("Error writing back on Flush for %s: %v", remotePath, err)
 		return syscall.EIO
@@ -233,7 +251,7 @@ func (n *WSNode) flushLocked(ctx context.Context) syscall.Errno {
 		n.registry.Unregister(n)
 	}
 
-	info, err := n.wfClient.Stat(ctx, remotePath)
+	info, err := n.wfClient.Stat(opCtx, remotePath)
 	if err != nil {
 		logging.Warnf("Error refreshing file info after Flush for %s: %v", remotePath, err)
 		return 0
@@ -392,7 +410,9 @@ func (n *WSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		return nil, syscall.ENOTDIR
 	}
 
-	entries, err := n.wfClient.ReadDir(ctx, n.Path())
+	opCtx, cancel := context.WithTimeout(ctx, dirListTimeout)
+	defer cancel()
+	entries, err := n.wfClient.ReadDir(opCtx, n.Path())
 	if err != nil {
 		logging.Warnf("Error reading directory %s: %v", n.Path(), err)
 		return nil, syscall.EIO
@@ -427,7 +447,9 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 		return nil, syscall.EINVAL
 	}
 
-	info, err := n.wfClient.Stat(ctx, childPath)
+	opCtx, cancel := context.WithTimeout(ctx, metadataOpTimeout)
+	defer cancel()
+	info, err := n.wfClient.Stat(opCtx, childPath)
 	if err != nil {
 		return nil, syscall.ENOENT
 	}
@@ -634,13 +656,16 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 		initialContent = []byte{}
 	}
 
-	err = n.wfClient.Write(ctx, childPath, initialContent)
+	opCtx, cancel := context.WithTimeout(ctx, dataOpTimeout)
+	defer cancel()
+
+	err = n.wfClient.Write(opCtx, childPath, initialContent)
 	if err != nil {
 		logging.Warnf("Error creating file %s: %v", childPath, err)
 		return nil, nil, 0, syscall.EIO
 	}
 
-	info, err := n.wfClient.Stat(ctx, childPath)
+	info, err := n.wfClient.Stat(opCtx, childPath)
 	if err != nil {
 		logging.Warnf("Error stating new file %s: %v", childPath, err)
 		return nil, nil, 0, syscall.EIO
@@ -670,7 +695,10 @@ func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return syscall.EINVAL
 	}
 
-	info, err := n.wfClient.Stat(ctx, childPath)
+	opCtx, cancel := context.WithTimeout(ctx, metadataOpTimeout)
+	defer cancel()
+
+	info, err := n.wfClient.Stat(opCtx, childPath)
 	if err != nil {
 		return syscall.ENOENT
 	}
@@ -679,7 +707,7 @@ func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return syscall.EISDIR
 	}
 
-	err = n.wfClient.Delete(ctx, childPath, false)
+	err = n.wfClient.Delete(opCtx, childPath, false)
 	if err != nil {
 		logging.Warnf("Error deleting file %s: %v", childPath, err)
 		return syscall.EIO
@@ -705,13 +733,16 @@ func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 		return nil, syscall.EINVAL
 	}
 
-	err = n.wfClient.Mkdir(ctx, childPath)
+	opCtx, cancel := context.WithTimeout(ctx, metadataOpTimeout)
+	defer cancel()
+
+	err = n.wfClient.Mkdir(opCtx, childPath)
 	if err != nil {
 		logging.Warnf("Error creating directory %s: %v", childPath, err)
 		return nil, syscall.EIO
 	}
 
-	info, err := n.wfClient.Stat(ctx, childPath)
+	info, err := n.wfClient.Stat(opCtx, childPath)
 	if err != nil {
 		logging.Warnf("Error stating new directory %s: %v", childPath, err)
 		return nil, syscall.EIO
@@ -738,7 +769,10 @@ func (n *WSNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		return syscall.EINVAL
 	}
 
-	info, err := n.wfClient.Stat(ctx, childPath)
+	opCtx, cancel := context.WithTimeout(ctx, metadataOpTimeout)
+	defer cancel()
+
+	info, err := n.wfClient.Stat(opCtx, childPath)
 	if err != nil {
 		return syscall.ENOENT
 	}
@@ -746,7 +780,7 @@ func (n *WSNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		return syscall.ENOTDIR
 	}
 
-	err = n.wfClient.Delete(ctx, childPath, false)
+	err = n.wfClient.Delete(opCtx, childPath, false)
 	if err != nil {
 		logging.Warnf("Error deleting directory %s: %v", childPath, err)
 		return syscall.EIO
@@ -776,7 +810,9 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 		return syscall.EINVAL
 	}
 
-	err = n.wfClient.Rename(ctx, oldPath, newPath)
+	opCtx, cancel := context.WithTimeout(ctx, metadataOpTimeout)
+	defer cancel()
+	err = n.wfClient.Rename(opCtx, oldPath, newPath)
 	if err != nil {
 		logging.Warnf("Error renaming %s to %s: %v", oldPath, newPath, err)
 		return syscall.EIO

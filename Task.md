@@ -173,7 +173,10 @@
   - DEBUG/INFO/WARN/ERROR レベル対応
   - `--debug` フラグとの後方互換性維持
   - `internal/logging/logging_test.go` にユニットテスト追加
-- [ ] 操作ごとの context.WithTimeout 設定
+- [x] 操作ごとの context.WithTimeout 設定
+  - dataOpTimeout (2分): 読み書き操作 (ensureDataLocked, flushLocked, Create)
+  - metadataOpTimeout (30秒): メタデータ操作 (Lookup, Unlink, Mkdir, Rmdir, Rename)
+  - dirListTimeout (1分): ディレクトリ一覧 (Readdir)
 
 ### P5-3: テスト・CI整備
 - [ ] Docker/CI 用の安定テストシナリオを整備
@@ -278,7 +281,7 @@
 ### プロダクト運用
 - ~~リトライ/バックオフ戦略がない~~ → P4-2 で対応済み（signed URL操作で429/5xxに対する指数バックオフリトライ）
 - レート制御がない
-- タイムアウトの一貫した設定がない（操作ごとの `context.WithTimeout`）
+- ~~タイムアウトの一貫した設定がない（操作ごとの `context.WithTimeout`）~~ → P5-2 で対応済み（dataOpTimeout/metadataOpTimeout/dirListTimeout）
 - 観測性の不足（メトリクス、read/write/stat/err カウンタ）
 
 ### コード品質
