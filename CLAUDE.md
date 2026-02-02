@@ -62,21 +62,21 @@ Set `DATABRICKS_HOST` and `DATABRICKS_TOKEN` in `.env` file.
 
 ```bash
 # Linux: Run all integration tests
-./scripts/tests/run_tests.sh /mnt/wsfs
+./scripts/run_tests.sh /mnt/wsfs
 
 # Linux: Run specific test suite
-./scripts/tests/run_tests.sh /mnt/wsfs --fuse-only
-./scripts/tests/run_tests.sh /mnt/wsfs --cache-only
+./scripts/run_tests.sh /mnt/wsfs --fuse-only
+./scripts/run_tests.sh /mnt/wsfs --cache-only
 
 # Mac: Run via Docker (recommended)
-./scripts/docker_test.sh
+./scripts/run_tests_docker.sh
 
 # Mac: Run with rebuild
-./scripts/docker_test.sh --build
+./scripts/run_tests_docker.sh --build
 
 # Mac: Run specific test suite
-./scripts/docker_test.sh --fuse-only
-./scripts/docker_test.sh --cache-only
+./scripts/run_tests_docker.sh --fuse-only
+./scripts/run_tests_docker.sh --cache-only
 ```
 
 ## Architecture Overview
@@ -188,8 +188,8 @@ Testing is enabled through thin interfaces:
 - `scripts/tests/cache_test.sh` - Unified cache tests (5 sections)
   - Basic cache operations, Cache invalidation, Remote sync
   - TTL/LRU behavior, Cache configuration tests
-- `scripts/tests/run_tests.sh` - Test runner for Linux
-- `scripts/docker_test.sh` - Docker-based test runner for Mac
+- `scripts/run_tests.sh` - Main test runner (Linux/Docker)
+- `scripts/run_tests_docker.sh` - Docker-based test runner for Mac
 
 #### Test Helpers
 - `scripts/tests/lib/test_helpers.sh` - Cross-platform (Linux/Mac) test utilities
@@ -274,7 +274,7 @@ After making significant code changes, you MUST run both unit tests and integrat
 go test ./...
 
 # Step 2: Run Docker integration tests (includes FUSE and cache tests)
-./scripts/docker_test.sh
+./scripts/run_tests_docker.sh
 ```
 
 **What counts as "significant changes":**

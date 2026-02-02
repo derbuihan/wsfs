@@ -11,7 +11,9 @@
 #   --log-file=PATH     Log file (default: /tmp/wsfs-test.log)
 #   --fuse-only         Run only FUSE tests
 #   --cache-only        Run only cache tests
+#   --stress-only       Run only stress tests
 #   --skip-cache        Skip cache tests
+#   --skip-stress       Skip stress tests
 #
 # Example:
 #   ./run_tests.sh /mnt/wsfs
@@ -20,7 +22,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/lib/test_helpers.sh"
+source "${SCRIPT_DIR}/tests/lib/test_helpers.sh"
 
 # Default values
 MOUNT_POINT=""
@@ -28,6 +30,7 @@ CACHE_DIR="/tmp/wsfs-cache"
 LOG_FILE="/tmp/wsfs-test.log"
 RUN_FUSE=true
 RUN_CACHE=true
+RUN_STRESS=true
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -42,14 +45,25 @@ while [[ $# -gt 0 ]]; do
       ;;
     --fuse-only)
       RUN_CACHE=false
+      RUN_STRESS=false
       shift
       ;;
     --cache-only)
       RUN_FUSE=false
+      RUN_STRESS=false
+      shift
+      ;;
+    --stress-only)
+      RUN_FUSE=false
+      RUN_CACHE=false
       shift
       ;;
     --skip-cache)
       RUN_CACHE=false
+      shift
+      ;;
+    --skip-stress)
+      RUN_STRESS=false
       shift
       ;;
     -*)
@@ -71,7 +85,9 @@ if [ -z "$MOUNT_POINT" ]; then
   echo "  --log-file=PATH     Log file (default: /tmp/wsfs-test.log)"
   echo "  --fuse-only         Run only FUSE tests"
   echo "  --cache-only        Run only cache tests"
+  echo "  --stress-only       Run only stress tests"
   echo "  --skip-cache        Skip cache tests"
+  echo "  --skip-stress       Skip stress tests"
   exit 1
 fi
 
@@ -88,6 +104,7 @@ echo "Cache directory: ${CACHE_DIR}"
 echo "Log file: ${LOG_FILE}"
 echo "Run FUSE tests: ${RUN_FUSE}"
 echo "Run Cache tests: ${RUN_CACHE}"
+echo "Run Stress tests: ${RUN_STRESS}"
 echo "========================================"
 echo ""
 
@@ -97,7 +114,7 @@ OVERALL_RESULT=0
 if [ "$RUN_FUSE" = true ]; then
   echo "Running FUSE tests..."
   echo ""
-  if ! bash "${SCRIPT_DIR}/fuse_test.sh" "$MOUNT_POINT"; then
+  if ! bash "${SCRIPT_DIR}/tests/fuse_test.sh" "$MOUNT_POINT"; then
     OVERALL_RESULT=1
   fi
   echo ""
@@ -107,7 +124,17 @@ fi
 if [ "$RUN_CACHE" = true ]; then
   echo "Running Cache tests..."
   echo ""
-  if ! bash "${SCRIPT_DIR}/cache_test.sh" "$MOUNT_POINT" "$CACHE_DIR" "$LOG_FILE"; then
+  if ! bash "${SCRIPT_DIR}/tests/cache_test.sh" "$MOUNT_POINT" "$CACHE_DIR" "$LOG_FILE"; then
+    OVERALL_RESULT=1
+  fi
+  echo ""
+fi
+
+# Run Stress tests
+if [ "$RUN_STRESS" = true ]; then
+  echo "Running Stress tests..."
+  echo ""
+  if ! bash "${SCRIPT_DIR}/tests/stress_test.sh" "$MOUNT_POINT"; then
     OVERALL_RESULT=1
   fi
   echo ""

@@ -111,8 +111,13 @@
 ## Phase 4: 本家 wsfs の安定性に近づける
 
 ### P4-1: スケール耐性
-- [ ] 並行アクセス、rename競合、トランケート連発の耐性をテスト強化
-- [ ] ロック/排他制御の整理
+- [x] 並行アクセス、rename競合、トランケート連発の耐性をテスト強化
+  - `internal/fuse/node_concurrent_test.go`: 7つの並行アクセステスト追加
+  - `scripts/tests/stress_test.sh`: 5つのストレステストシナリオ追加
+- [x] ロック/排他制御の整理
+  - Rename の race condition 修正（子ノードのロック追加）
+  - ログ出力をロック内に移動（Path() の race condition 修正）
+  - `go test -race` で全テスト pass
 
 ### P4-2: エラー処理強化
 - [x] 失敗時ログ + フォールバック（既存のフォールバック機構で対応済み）
@@ -218,9 +223,9 @@
 - [x] 10MB〜100MBのファイル read/write (`scripts/large_file_test.sh` で10MB実装済み、50MB/100MBはオプション)
 - [x] キャッシュ ON/OFF 両方で同じ結果 (`scripts/docker_cache_test.sh` Test 1 & 2 で検証済み)
 - [x] Databricks公式実装との整合性検証 (`scripts/databricks_cli_verification_test.sh` で完全検証済み)
-- [ ] 連続 truncate
-- [ ] 連続 rename/mv
-- [ ] 複数同時 write
+- [x] 連続 truncate (`internal/fuse/node_concurrent_test.go`: TestConcurrentTruncate, TestRapidSetattrTruncate)
+- [x] 連続 rename/mv (`scripts/tests/stress_test.sh`: test_rename_operations)
+- [x] 複数同時 write (`internal/fuse/node_concurrent_test.go`: TestConcurrentReadWrite, TestConcurrentWriteFlush)
 - [x] `CopyToCache` のテスト (`internal/filecache/disk_cache_test.go`: TestDiskCacheCopyToCache)
 - [x] `sanitizeURL`, `sanitizeError` のテスト (`internal/databricks/client_test.go`: TestSanitizeURL, TestSanitizeError)
 - [ ] 巨大ファイル（100MB+）のメモリ使用量テスト

@@ -341,10 +341,10 @@ func (n *WSNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno 
 }
 
 func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
-	logging.Debugf("Setattr called on path: %s", n.Path())
-
 	n.mu.Lock()
 	defer n.mu.Unlock()
+
+	logging.Debugf("Setattr called on path: %s", n.fileInfo.Path)
 
 	if _, ok := in.GetMode(); ok {
 		return syscall.ENOTSUP
@@ -471,10 +471,10 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 }
 
 func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	logging.Debugf("Open called on path: %s", n.Path())
-
 	n.mu.Lock()
 	defer n.mu.Unlock()
+
+	logging.Debugf("Open called on path: %s", n.fileInfo.Path)
 
 	if n.fileInfo.IsDir() {
 		return nil, 0, syscall.EISDIR
@@ -482,17 +482,17 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 
 	// Check for remote modifications before using cached data
 	if n.buf.Data != nil && !n.buf.Dirty {
-		info, err := n.wfClient.Stat(ctx, n.Path())
+		info, err := n.wfClient.Stat(ctx, n.fileInfo.Path)
 		if err == nil {
 			wsInfo, ok := info.(databricks.WSFileInfo)
 			if ok && wsInfo.ModTime().After(n.fileInfo.ModTime()) {
 				// Remote file was modified, invalidate cache
-				logging.Debugf("Remote file modified, invalidating cache for %s", n.Path())
+				logging.Debugf("Remote file modified, invalidating cache for %s", n.fileInfo.Path)
 				n.buf.Data = nil
 				n.fileInfo = wsInfo
 				// Also invalidate disk cache
 				if n.diskCache != nil && !n.diskCache.IsDisabled() {
-					actualPath := strings.TrimSuffix(n.Path(), ".ipynb")
+					actualPath := strings.TrimSuffix(n.fileInfo.Path, ".ipynb")
 					n.diskCache.Delete(actualPath)
 				}
 			}
@@ -550,10 +550,10 @@ func (n *WSNode) OpendirHandle(ctx context.Context, flags uint32) (fs.FileHandle
 }
 
 func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	logging.Debugf("Read called on path: %s, offset: %d, size: %d", n.Path(), off, len(dest))
-
 	n.mu.Lock()
 	defer n.mu.Unlock()
+
+	logging.Debugf("Read called on path: %s, offset: %d, size: %d", n.fileInfo.Path, off, len(dest))
 
 	if n.buf.Data == nil {
 		if errno := n.ensureDataLocked(ctx); errno != 0 {
@@ -575,10 +575,10 @@ func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off in
 }
 
 func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
-	logging.Debugf("Write called on path: %s, offset: %d, size: %d", n.Path(), off, len(data))
-
 	n.mu.Lock()
 	defer n.mu.Unlock()
+
+	logging.Debugf("Write called on path: %s, offset: %d, size: %d", n.fileInfo.Path, off, len(data))
 	if off < 0 {
 		return 0, syscall.EINVAL
 	}
@@ -607,29 +607,26 @@ func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off i
 }
 
 func (n *WSNode) Flush(ctx context.Context, fh fs.FileHandle) syscall.Errno {
-	logging.Debugf("Flush called on path: %s", n.Path())
-
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	logging.Debugf("Flush called on path: %s", n.fileInfo.Path)
 	return n.flushLocked(ctx)
 }
 
 func (n *WSNode) Fsync(ctx context.Context, fh fs.FileHandle, flags uint32) syscall.Errno {
-	logging.Debugf("Fsync called on path: %s", n.Path())
-
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	logging.Debugf("Fsync called on path: %s", n.fileInfo.Path)
 	return n.flushLocked(ctx)
 }
 
 func (n *WSNode) Release(ctx context.Context, fh fs.FileHandle) syscall.Errno {
-	logging.Debugf("Release called on path: %s", n.Path())
-
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	logging.Debugf("Release called on path: %s", n.fileInfo.Path)
 	errno := n.flushLocked(ctx)
 	if errno == 0 {
 		n.buf.Data = nil
@@ -831,8 +828,10 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 	if childInode != nil {
 		childNode, ok := childInode.Operations().(*WSNode)
 		if ok {
+			childNode.mu.Lock()
 			logging.Debugf("Updating internal path for in-memory node from '%s' to '%s'", childNode.fileInfo.Path, actualNewPath)
 			childNode.fileInfo.Path = actualNewPath
+			childNode.mu.Unlock()
 		}
 	}
 
@@ -840,10 +839,10 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 }
 
 func (n *WSNode) OnForget() {
-	logging.Debugf("OnForget called on path: %s", n.Path())
-
 	n.mu.Lock()
 	defer n.mu.Unlock()
+
+	logging.Debugf("OnForget called on path: %s", n.fileInfo.Path)
 
 	if n.buf.Dirty {
 		return
