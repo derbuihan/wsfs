@@ -1026,9 +1026,9 @@ func TestValidateChildPath(t *testing.T) {
 // Cache Corruption Recovery Tests
 // ============================================================================
 
-// TestEnsureDataLockedWithCorruptedCache verifies that ensureDataLocked detects
-// corrupted cache entries and recovers by re-fetching from remote
-func TestEnsureDataLockedWithCorruptedCache(t *testing.T) {
+// TestEnsureDataLockedWithMissingCacheFile verifies that ensureDataLocked
+// re-fetches from remote when cache file is missing
+func TestEnsureDataLockedWithMissingCacheFile(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create a real disk cache
@@ -1069,31 +1069,30 @@ func TestEnsureDataLockedWithCorruptedCache(t *testing.T) {
 		}},
 	}
 
-	// Corrupt the cache file
-	corruptedData := []byte("CORRUPTED!")
-	if err := os.WriteFile(localPath, corruptedData, 0600); err != nil {
-		t.Fatalf("Failed to corrupt cache file: %v", err)
+	// Delete the cache file to simulate missing file
+	if err := os.Remove(localPath); err != nil {
+		t.Fatalf("Failed to remove cache file: %v", err)
 	}
 
-	// Call ensureDataLocked - should detect corruption and fetch from remote
+	// Call ensureDataLocked - should detect missing file and fetch from remote
 	errno := n.ensureDataLocked(context.Background())
 	if errno != 0 {
 		t.Fatalf("ensureDataLocked failed with errno: %d", errno)
 	}
 
-	// Verify that ReadAll was called (recovery from corruption)
+	// Verify that ReadAll was called (recovery from missing cache)
 	if !readAllCalled {
-		t.Error("Expected ReadAll to be called after cache corruption detected")
+		t.Error("Expected ReadAll to be called after cache file missing")
 	}
 
-	// Verify that buffer has fresh data from remote
-	if string(n.buf.Data) != string(freshData) {
-		t.Errorf("Expected buffer to have fresh data %q, got %q", string(freshData), string(n.buf.Data))
+	// Verify that CachedPath is set (data fetched and cached)
+	if n.buf.CachedPath == "" {
+		t.Error("Expected CachedPath to be set after fetching from remote")
 	}
 }
 
-// TestEnsureDataLockedWithValidCache verifies that ensureDataLocked uses cache
-// when checksum is valid
+// TestEnsureDataLockedWithValidCache verifies that ensureDataLocked sets
+// CachedPath when cache is valid (on-demand read optimization)
 func TestEnsureDataLockedWithValidCache(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -1108,7 +1107,7 @@ func TestEnsureDataLockedWithValidCache(t *testing.T) {
 	modTime := time.Now()
 
 	// Pre-populate cache
-	_, err = cache.Set(remotePath, cachedData, modTime)
+	localPath, err := cache.Set(remotePath, cachedData, modTime)
 	if err != nil {
 		t.Fatalf("Failed to set cache: %v", err)
 	}
@@ -1145,8 +1144,18 @@ func TestEnsureDataLockedWithValidCache(t *testing.T) {
 		t.Error("Expected ReadAll NOT to be called when cache is valid")
 	}
 
-	// Verify that buffer has cached data
-	if string(n.buf.Data) != string(cachedData) {
-		t.Errorf("Expected buffer to have cached data %q, got %q", string(cachedData), string(n.buf.Data))
+	// Verify that CachedPath is set (on-demand read optimization)
+	if n.buf.CachedPath != localPath {
+		t.Errorf("Expected CachedPath to be %q, got %q", localPath, n.buf.CachedPath)
+	}
+
+	// Verify that Data is NOT loaded (lazy loading)
+	if n.buf.Data != nil {
+		t.Error("Expected Data to be nil (on-demand read optimization)")
+	}
+
+	// Verify that FileSize is set correctly
+	if n.buf.FileSize != int64(len(cachedData)) {
+		t.Errorf("Expected FileSize to be %d, got %d", len(cachedData), n.buf.FileSize)
 	}
 }

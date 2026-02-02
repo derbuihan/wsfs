@@ -211,10 +211,12 @@
 > **優先度**: Phase 4/5 完了後に実施
 
 ### P6-1: メモリ効率改善
-- [ ] `ReadAll()` のストリーミング対応
-  - [ ] ディスクキャッシュから直接読み込み（全メモリ保持を回避）
-  - [ ] mmap または逐次読み込みの検討
-- [ ] 書き込みの一時ファイル経由化
+- [x] 読み込みのオンデマンド化
+  - [x] ディスクキャッシュから直接読み込み（全メモリ保持を回避）
+  - [x] `ensureDataLocked()` でキャッシュパスのみ設定（データロードなし）
+  - [x] `Read()` でキャッシュファイルから `ReadAt()` で部分読み込み
+  - [x] `fileBuffer` に `CachedPath`, `FileSize` フィールド追加
+- [ ] 書き込みの一時ファイル経由化（オプション・将来対応）
   - [ ] メモリ保持を最小化
   - [ ] Flush/Release で一括アップロード
 
@@ -242,7 +244,8 @@
 - [x] 複数同時 write (`internal/fuse/node_concurrent_test.go`: TestConcurrentReadWrite, TestConcurrentWriteFlush)
 - [x] `CopyToCache` のテスト (`internal/filecache/disk_cache_test.go`: TestDiskCacheCopyToCache)
 - [x] `sanitizeURL`, `sanitizeError` のテスト (`internal/databricks/client_test.go`: TestSanitizeURL, TestSanitizeError)
-- [ ] 巨大ファイル（100MB+）のメモリ使用量テスト
+- [x] オンデマンド読み込みテスト (`internal/fuse/node_test.go`: TestEnsureDataLockedWithValidCache, TestEnsureDataLockedWithMissingCacheFile)
+- [ ] 巨大ファイル（100MB+）のメモリ使用量テスト（読み込みはP6-1で対応、書き込みは将来対応）
 
 ---
 

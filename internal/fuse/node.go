@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	iofs "io/fs"
 	"os"
 	"path"
@@ -59,9 +60,12 @@ const (
 )
 
 // fileBuffer holds in-memory file data and dirty state.
+// For memory efficiency, CachedPath can be set instead of Data to read directly from cache.
 type fileBuffer struct {
-	Data  []byte
-	Dirty bool
+	Data       []byte
+	Dirty      bool
+	CachedPath string // Path to cached file for on-demand reading
+	FileSize   int64  // File size for cached file reads
 }
 
 // NodeConfig holds configuration for access control.
@@ -170,9 +174,21 @@ func validateChildPath(parentPath, childName string) (string, error) {
 }
 
 func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
+	// If dirty, data must already be in memory
+	if n.buf.Dirty {
+		return 0
+	}
+
+	// If data is already in memory, nothing to do
 	if n.buf.Data != nil {
 		return 0
 	}
+
+	// If cache path is already set, nothing to do
+	if n.buf.CachedPath != "" {
+		return 0
+	}
+
 	if n.fileInfo.IsDir() {
 		return syscall.EISDIR
 	}
@@ -180,28 +196,20 @@ func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
 	remotePath := n.Path()
 	remoteModTime := n.fileInfo.ModTime()
 
-	// Try to get from cache first
+	// Try to get from cache first (only set CachedPath, don't load data)
 	if n.diskCache != nil && !n.diskCache.IsDisabled() {
-		cachedPath, expectedChecksum, found := n.diskCache.Get(remotePath, remoteModTime)
+		cachedPath, _, found := n.diskCache.Get(remotePath, remoteModTime)
 		if found {
-			// Read from cached file
-			data, err := os.ReadFile(cachedPath)
-			if err == nil {
-				// Verify checksum for integrity
-				actualChecksum := filecache.CalculateChecksum(data)
-				if actualChecksum == expectedChecksum {
-					logging.Debugf("Cache hit for %s (checksum verified)", remotePath)
-					n.buf.Data = data
-					return 0
-				}
-				// Checksum mismatch - cache is corrupted
-				logging.Warnf("Cache corruption detected for %s (expected %s..., got %s...)",
-					remotePath, truncateChecksum(expectedChecksum), truncateChecksum(actualChecksum))
-				n.diskCache.Delete(remotePath)
-			} else {
-				// Cache read failed, fall through to remote read
-				logging.Debugf("Cache read failed for %s: %v", remotePath, err)
+			// Verify cache file exists
+			if _, err := os.Stat(cachedPath); err == nil {
+				n.buf.CachedPath = cachedPath
+				n.buf.FileSize = n.fileInfo.Size()
+				logging.Debugf("Cache path set for %s (on-demand read)", remotePath)
+				return 0
 			}
+			// Cache file missing, delete entry and fall through to remote read
+			logging.Debugf("Cache file missing for %s, fetching from remote", remotePath)
+			n.diskCache.Delete(remotePath)
 		}
 	}
 
@@ -217,23 +225,38 @@ func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
 		}
 		return syscall.EIO
 	}
-	n.buf.Data = data
 
-	// Store in cache
+	// Store in cache and use cache path for on-demand reads
 	if n.diskCache != nil && !n.diskCache.IsDisabled() {
-		_, err := n.diskCache.Set(remotePath, data, remoteModTime)
-		if err != nil {
-			// Log error but don't fail the operation
-			logging.Debugf("Failed to cache file %s: %v", remotePath, err)
-		} else {
-			logging.Debugf("Cached file %s (%d bytes)", remotePath, len(data))
+		localPath, err := n.diskCache.Set(remotePath, data, remoteModTime)
+		if err == nil {
+			n.buf.CachedPath = localPath
+			n.buf.FileSize = int64(len(data))
+			logging.Debugf("Cached file %s (%d bytes), using on-demand read", remotePath, len(data))
+			return 0
 		}
+		// Cache set failed, fall back to memory
+		logging.Debugf("Failed to cache file %s: %v, using memory", remotePath, err)
 	}
 
+	// Fallback: keep data in memory (when cache is disabled or failed)
+	n.buf.Data = data
 	return 0
 }
 
 func (n *WSNode) truncateLocked(size uint64) {
+	// If data is in cache but not memory, load it first
+	if n.buf.Data == nil && n.buf.CachedPath != "" {
+		cacheData, err := os.ReadFile(n.buf.CachedPath)
+		if err != nil {
+			logging.Warnf("Failed to load cache file for truncate %s: %v", n.buf.CachedPath, err)
+			// Fall through with empty data
+			n.buf.Data = []byte{}
+		} else {
+			n.buf.Data = cacheData
+		}
+	}
+
 	if n.buf.Data == nil {
 		n.buf.Data = []byte{}
 	}
@@ -527,7 +550,7 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 	}
 
 	// Check for remote modifications before using cached data
-	if n.buf.Data != nil && !n.buf.Dirty {
+	if (n.buf.Data != nil || n.buf.CachedPath != "") && !n.buf.Dirty {
 		info, err := n.wfClient.Stat(ctx, n.fileInfo.Path)
 		if err == nil {
 			wsInfo, ok := info.(databricks.WSFileInfo)
@@ -535,6 +558,8 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 				// Remote file was modified, invalidate cache
 				logging.Debugf("Remote file modified, invalidating cache for %s", n.fileInfo.Path)
 				n.buf.Data = nil
+				n.buf.CachedPath = ""
+				n.buf.FileSize = 0
 				n.fileInfo = wsInfo
 				// Also invalidate disk cache
 				if n.diskCache != nil && !n.diskCache.IsDisabled() {
@@ -547,13 +572,15 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 
 	if flags&syscall.O_TRUNC != 0 {
 		n.buf.Data = []byte{}
+		n.buf.CachedPath = ""
+		n.buf.FileSize = 0
 		n.fileInfo.ObjectInfo.Size = 0
 		n.markModifiedLocked(time.Now())
 		n.buf.Dirty = true
 		if n.registry != nil {
 			n.registry.Register(n)
 		}
-	} else if n.buf.Data == nil {
+	} else if n.buf.Data == nil && n.buf.CachedPath == "" {
 		if errno := n.ensureDataLocked(ctx); errno != 0 {
 			return nil, 0, errno
 		}
@@ -601,23 +628,86 @@ func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off in
 
 	logging.Debugf("Read called on path: %s, offset: %d, size: %d", n.fileInfo.Path, off, len(dest))
 
+	// 1. If dirty, must read from memory buffer
+	if n.buf.Dirty && n.buf.Data != nil {
+		return n.readFromMemory(dest, off)
+	}
+
+	// 2. If cache path is set, read directly from cache file (on-demand)
+	if n.buf.CachedPath != "" {
+		return n.readFromCacheFile(dest, off)
+	}
+
+	// 3. If data is in memory, read from memory
+	if n.buf.Data != nil {
+		return n.readFromMemory(dest, off)
+	}
+
+	// 4. Data not loaded yet, load it
+	if errno := n.ensureDataLocked(ctx); errno != 0 {
+		return nil, errno
+	}
+
+	// After ensureDataLocked, check again
+	if n.buf.CachedPath != "" {
+		return n.readFromCacheFile(dest, off)
+	}
+
+	// Fallback to memory read
+	return n.readFromMemory(dest, off)
+}
+
+// readFromMemory reads data from the in-memory buffer
+func (n *WSNode) readFromMemory(dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	if n.buf.Data == nil {
-		if errno := n.ensureDataLocked(ctx); errno != 0 {
-			return nil, errno
-		}
+		return fuse.ReadResultData([]byte{}), 0
+	}
+
+	dataLen := int64(len(n.buf.Data))
+	if off >= dataLen {
+		return fuse.ReadResultData([]byte{}), 0
 	}
 
 	end := off + int64(len(dest))
-	if end > int64(len(n.buf.Data)) {
-		end = int64(len(n.buf.Data))
-	}
-
-	if off >= int64(len(n.buf.Data)) {
-		return fuse.ReadResultData([]byte{}), 0
+	if end > dataLen {
+		end = dataLen
 	}
 
 	result := n.buf.Data[off:end]
 	return fuse.ReadResultData(result), 0
+}
+
+// readFromCacheFile reads data directly from the cache file (on-demand read)
+func (n *WSNode) readFromCacheFile(dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	f, err := os.Open(n.buf.CachedPath)
+	if err != nil {
+		logging.Warnf("Failed to open cache file %s: %v", n.buf.CachedPath, err)
+		// Cache file missing, clear and return error
+		n.buf.CachedPath = ""
+		n.buf.FileSize = 0
+		return nil, syscall.EIO
+	}
+	defer f.Close()
+
+	// Check bounds
+	if off >= n.buf.FileSize {
+		return fuse.ReadResultData([]byte{}), 0
+	}
+
+	end := off + int64(len(dest))
+	if end > n.buf.FileSize {
+		end = n.buf.FileSize
+	}
+
+	readSize := end - off
+	buf := make([]byte, readSize)
+	bytesRead, err := f.ReadAt(buf, off)
+	if err != nil && err != io.EOF {
+		logging.Warnf("Failed to read from cache file %s: %v", n.buf.CachedPath, err)
+		return nil, syscall.EIO
+	}
+
+	return fuse.ReadResultData(buf[:bytesRead]), 0
 }
 
 func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
@@ -628,10 +718,39 @@ func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off i
 	if off < 0 {
 		return 0, syscall.EINVAL
 	}
+
+	// For writes, we need the data in memory
 	if n.buf.Data == nil {
-		if errno := n.ensureDataLocked(ctx); errno != 0 {
-			return 0, errno
+		// If cache path is set, load from cache file
+		if n.buf.CachedPath != "" {
+			cacheData, err := os.ReadFile(n.buf.CachedPath)
+			if err != nil {
+				logging.Warnf("Failed to load cache file for write %s: %v", n.buf.CachedPath, err)
+				return 0, syscall.EIO
+			}
+			n.buf.Data = cacheData
+			logging.Debugf("Loaded %d bytes from cache for write on %s", len(cacheData), n.fileInfo.Path)
+		} else {
+			// No cache path, call ensureDataLocked
+			if errno := n.ensureDataLocked(ctx); errno != 0 {
+				return 0, errno
+			}
+			// After ensureDataLocked, if CachedPath is set but Data is nil, load from cache
+			if n.buf.Data == nil && n.buf.CachedPath != "" {
+				cacheData, err := os.ReadFile(n.buf.CachedPath)
+				if err != nil {
+					logging.Warnf("Failed to load cache file for write %s: %v", n.buf.CachedPath, err)
+					return 0, syscall.EIO
+				}
+				n.buf.Data = cacheData
+				logging.Debugf("Loaded %d bytes from cache for write on %s", len(cacheData), n.fileInfo.Path)
+			}
 		}
+	}
+
+	// Ensure we have a buffer (may be empty for new files)
+	if n.buf.Data == nil {
+		n.buf.Data = []byte{}
 	}
 
 	end := off + int64(len(data))
@@ -677,6 +796,8 @@ func (n *WSNode) Release(ctx context.Context, fh fs.FileHandle) syscall.Errno {
 	if errno == 0 {
 		n.buf.Data = nil
 		n.buf.Dirty = false
+		n.buf.CachedPath = ""
+		n.buf.FileSize = 0
 	}
 
 	return errno
@@ -910,6 +1031,8 @@ func (n *WSNode) OnForget() {
 	}
 	n.buf.Data = nil
 	n.buf.Dirty = false
+	n.buf.CachedPath = ""
+	n.buf.FileSize = 0
 }
 
 func NewRootNode(wfClient databricks.WorkspaceFilesAPI, diskCache *filecache.DiskCache, rootPath string, registry *DirtyNodeRegistry, config *NodeConfig) (*WSNode, error) {
