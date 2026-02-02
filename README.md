@@ -27,35 +27,6 @@ Notes:
 
 Behavior details: see `docs/behavior.md`.
 
-## TODO: Improve wsfs toward an ideal FUSE filesystem
-
-These are the most important gaps discovered so far (see `docs/databricks-api-survey.md` for API details).
-
-### Data path & performance
-- Support large file uploads via `workspace-files/new-files` + signed URL upload (currently returns SAS URL; upload step fails with 403 and needs correct method/headers/permissions).
-- Determine correct request schema for `workspace-files/write-files` (current attempts return BAD_REQUEST).
-- Implement smarter caching (read cache + write-back with consistency/eviction).
-
-### Semantics & compatibility
-- Decide on xattr behavior (`Get/Set/List/Remove` → `ENOTSUP` or emulation).
-- Decide on symlink/hardlink/device support (`Readlink`, `Symlink`, `Link`, `Mknod` likely `ENOTSUP`).
-- Add advisory locks (`Getlk/Setlk/Setlkw`) or return `ENOTSUP`.
-- Add `Lseek`/sparse support or return `ENOTSUP`.
-
-### Lifecycle & correctness
-- `Statx` mapping to `workspace-files/object-info` fields.
-
-### API discovery gaps
-- Figure out required params for `workspace-files/get-safe-flags`.
-- Validate `notebooks/sync-notebooks-to-wsfs` side effects and response contract.
-
-## Distribution & Development Experience
-
-- [ ] Automate release builds using GitHub Actions.
-- [ ] Support installation via Homebrew (`brew install`).
-- [ ] Expand unit and integration tests to ensure stability.
-- [ ] Allow users to develop on Databricks directly from VSCode by running wsfs within a Remote Container.
-
 ## Usage
 
 1. Install FUSE on your system if you haven't already.
@@ -82,6 +53,63 @@ $ cd <mount-point>
 $ ls
 Repos  Shared  Users
 ```
+
+## Security Considerations
+
+> **Important:** wsfs is designed for single-user development environments.
+
+### Single-User Environment
+
+wsfs does not implement access control. The `Access()` system call always permits all operations. This means:
+
+- All local users can read/write files through the mount point
+- Operations use the Databricks token owner's permissions
+- There is no UID/GID-based access restriction
+
+**Recommendation:** Use wsfs only on machines where you are the sole user.
+
+### The `--allow-other` Flag
+
+By default, only the user who mounted wsfs can access the mount point. The `--allow-other` flag allows other users to access it.
+
+**Warning:** Do NOT use `--allow-other` unless absolutely necessary. When enabled:
+- All local users gain access to your Databricks workspace
+- They can read, write, and delete files using your token's permissions
+- There is no way to restrict access to specific users
+
+### Cache Security
+
+wsfs creates cache files with restricted permissions:
+- Cache directory: `0700` (owner only)
+- Cache files: `0600` (owner read/write only)
+
+The default cache location is `/tmp/wsfs-cache`. For sensitive data, consider using a custom location:
+
+```bash
+./wsfs --cache-dir=/home/user/.wsfs-cache <mount-point>
+```
+
+### Token Security
+
+The `DATABRICKS_TOKEN` environment variable contains sensitive credentials:
+- Never commit `.env` files to version control
+- Avoid passing tokens via command line arguments (visible in `ps`)
+- Consider using Databricks CLI profiles or OAuth for authentication
+
+## Recommended Use Cases
+
+### Recommended
+
+- **Local development** - Edit Databricks notebooks and files from your local IDE
+- **CI/CD pipelines** - Temporary mounts for automated workflows
+- **VSCode Remote Containers** - Development in isolated container environments
+
+### Not Recommended
+
+- **Shared servers** - Multiple users would share the same Databricks token permissions
+- **Production/long-running services** - Not designed for high-availability or concurrent access
+- **Sensitive data environments** - Limited access control and audit capabilities
+- **With `--allow-other` enabled** - Exposes your Databricks access to all local users
 
 ## Cache Configuration
 
