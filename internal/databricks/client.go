@@ -405,21 +405,6 @@ func (c *WorkspaceFilesClient) writeViaNewFiles(ctx context.Context, filepath st
 	return nil
 }
 
-func (c *WorkspaceFilesClient) writeViaWriteFiles(ctx context.Context, filepath string, data []byte) error {
-	contentB64 := base64.StdEncoding.EncodeToString(data)
-	reqBody := map[string]any{
-		"files": []map[string]any{
-			{
-				"path":      filepath,
-				"content":   contentB64,
-				"overwrite": true,
-			},
-		},
-	}
-
-	return c.apiClient.Do(ctx, http.MethodPost, "/api/2.0/workspace-files/write-files", nil, nil, reqBody, nil)
-}
-
 func (c *WorkspaceFilesClient) Write(ctx context.Context, filepath string, data []byte) error {
 	// Check if existing file is a notebook
 	info, err := c.Stat(ctx, filepath)
@@ -447,17 +432,9 @@ func (c *WorkspaceFilesClient) Write(ctx context.Context, filepath string, data 
 		logging.Debugf("Write via new-files succeeded for path: %s", actualPath)
 		return nil
 	}
-	logging.Debugf("Write via new-files failed for path: %s, trying write-files: %s", actualPath, sanitizeError(err))
+	logging.Debugf("Write via new-files failed for path: %s, falling back to import-file: %s", actualPath, sanitizeError(err))
 
-	// 2. Try write-files (experimental)
-	err = c.writeViaWriteFiles(ctx, actualPath, data)
-	if err == nil {
-		logging.Debugf("Write via write-files succeeded for path: %s", actualPath)
-		return nil
-	}
-	logging.Debugf("Write via write-files failed for path: %s, falling back to import-file: %s", actualPath, sanitizeError(err))
-
-	// 3. Fallback: import-file
+	// 2. Fallback: import-file
 	urlPath := fmt.Sprintf(
 		"/api/2.0/workspace-files/import-file/%s?overwrite=true",
 		url.PathEscape(strings.TrimLeft(actualPath, "/")),

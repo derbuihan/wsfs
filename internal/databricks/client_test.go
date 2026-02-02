@@ -292,9 +292,6 @@ func TestWriteFallbackToImportFile(t *testing.T) {
 			if strings.Contains(path, "new-files") {
 				return fmt.Errorf("new-files API error")
 			}
-			if strings.Contains(path, "write-files") {
-				return fmt.Errorf("write-files API error")
-			}
 			if strings.Contains(path, "import-file") {
 				importFileCalled = true
 				return nil
@@ -407,7 +404,7 @@ func TestCacheInvalidation(t *testing.T) {
 			if strings.Contains(path, "import-file") {
 				return nil
 			}
-			if strings.Contains(path, "new-files") || strings.Contains(path, "write-files") {
+			if strings.Contains(path, "new-files") {
 				return fmt.Errorf("skip to fallback")
 			}
 			return fmt.Errorf("unexpected path: %s", path)
