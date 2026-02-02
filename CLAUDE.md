@@ -54,9 +54,13 @@ Databricks Workspace APIs
 
 ### Key Design Patterns
 
-1. **Fallback Strategy**
-   - Read: signed URL → workspace.Export
-   - Write: new-files → import-file
+1. **Size-based API Selection** (5MB threshold)
+   - Read:
+     - < 5MB: workspace.Export 直接 (1 round trip)
+     - >= 5MB: signed URL → workspace.Export (fallback)
+   - Write:
+     - < 5MB: import-file 直接 (1 round trip)
+     - >= 5MB: new-files → import-file (fallback)
 
 2. **Two-Level Caching**
    - Metadata cache: 60s TTL (internal/metacache/)

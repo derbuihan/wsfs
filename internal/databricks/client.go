@@ -30,6 +30,11 @@ const httpTimeout = 2 * time.Minute
 // Maximum length for response body in error messages
 const maxErrorBodyLen = 200
 
+// Size threshold for API selection (5MB)
+// Files smaller than this use import-file directly (1 round trip)
+// Files larger than this use new-files + signed URL (direct cloud storage)
+const sizeThresholdForSignedURL = 5 * 1024 * 1024 // 5MB
+
 // sanitizeURL removes query parameters from a URL to avoid exposing signed tokens
 func sanitizeURL(rawURL string) string {
 	parsed, err := url.Parse(rawURL)
@@ -333,19 +338,32 @@ func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]
 		return base64.StdEncoding.DecodeString(resp.Content)
 	}
 
-	// 2. Try to use signed URL if available (for non-notebook files)
+	// Size-based API selection for regular files
+	fileSize := wsInfo.Size()
+
+	if fileSize < sizeThresholdForSignedURL {
+		// Small files: use Export directly (1 round trip)
+		logging.Debugf("Read via Export (size %d < %d threshold) for path: %s", fileSize, sizeThresholdForSignedURL, actualPath)
+		return c.readViaExport(ctx, actualPath)
+	}
+
+	// Large files: try signed URL first
 	if wsInfo.SignedURL != "" {
+		logging.Debugf("Read via signed URL (size %d >= %d threshold) for path: %s", fileSize, sizeThresholdForSignedURL, actualPath)
 		data, err := c.readViaSignedURL(ctx, wsInfo.SignedURL, wsInfo.SignedURLHeaders)
 		if err == nil {
-			logging.Debugf("Read via signed URL succeeded for path: %s", actualPath)
 			return data, nil
 		}
 		logging.Debugf("Read via signed URL failed for path: %s, falling back to Export: %s", actualPath, sanitizeError(err))
 	}
 
-	// 3. Fallback: workspace.Export
+	// Fallback: workspace.Export (for large files when signed URL fails or not available)
+	return c.readViaExport(ctx, actualPath)
+}
+
+func (c *WorkspaceFilesClient) readViaExport(ctx context.Context, filepath string) ([]byte, error) {
 	resp, err := c.workspaceClient.Export(ctx, workspace.ExportRequest{
-		Path:   actualPath,
+		Path:   filepath,
 		Format: workspace.ExportFormatSource,
 	})
 	if err != nil {
@@ -405,6 +423,14 @@ func (c *WorkspaceFilesClient) writeViaNewFiles(ctx context.Context, filepath st
 	return nil
 }
 
+func (c *WorkspaceFilesClient) writeViaImportFile(ctx context.Context, filepath string, data []byte) error {
+	urlPath := fmt.Sprintf(
+		"/api/2.0/workspace-files/import-file/%s?overwrite=true",
+		url.PathEscape(strings.TrimLeft(filepath, "/")),
+	)
+	return c.apiClient.Do(ctx, http.MethodPost, urlPath, nil, nil, data, nil)
+}
+
 func (c *WorkspaceFilesClient) Write(ctx context.Context, filepath string, data []byte) error {
 	// Check if existing file is a notebook
 	info, err := c.Stat(ctx, filepath)
@@ -426,21 +452,23 @@ func (c *WorkspaceFilesClient) Write(ctx context.Context, filepath string, data 
 	actualPath := pathutil.ToRemotePath(filepath)
 	c.cache.Invalidate(actualPath)
 
-	// 1. Try new-files (experimental)
+	// Size-based API selection
+	if len(data) < sizeThresholdForSignedURL {
+		// Small files: use import-file directly (1 round trip)
+		logging.Debugf("Write via import-file (size %d < %d threshold) for path: %s", len(data), sizeThresholdForSignedURL, actualPath)
+		return c.writeViaImportFile(ctx, actualPath, data)
+	}
+
+	// Large files: try new-files + signed URL first
+	logging.Debugf("Write via new-files (size %d >= %d threshold) for path: %s", len(data), sizeThresholdForSignedURL, actualPath)
 	err = c.writeViaNewFiles(ctx, actualPath, data)
 	if err == nil {
-		logging.Debugf("Write via new-files succeeded for path: %s", actualPath)
 		return nil
 	}
 	logging.Debugf("Write via new-files failed for path: %s, falling back to import-file: %s", actualPath, sanitizeError(err))
 
-	// 2. Fallback: import-file
-	urlPath := fmt.Sprintf(
-		"/api/2.0/workspace-files/import-file/%s?overwrite=true",
-		url.PathEscape(strings.TrimLeft(actualPath, "/")),
-	)
-
-	return c.apiClient.Do(ctx, http.MethodPost, urlPath, nil, nil, data, nil)
+	// Fallback: import-file (for large files when new-files fails)
+	return c.writeViaImportFile(ctx, actualPath, data)
 }
 
 func (c *WorkspaceFilesClient) WriteNotebook(ctx context.Context, filePath string, data []byte) error {

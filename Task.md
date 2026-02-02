@@ -9,6 +9,10 @@
 ### パフォーマンス改善
 - [ ] 書き込みの一時ファイル経由化（巨大ファイル書き込み時のメモリ使用量削減）
 - [ ] fusePath/remotePath の型安全ラッパー（コンパイル時のバグ検出）
+- [x] サイズベース API 選択戦略（5MB しきい値で実装済み）
+  - 小さいファイル (<5MB): import-file 直接送信（1 round trip）
+  - 大きいファイル (>=5MB): new-files + signed URL（クラウドストレージ直接）
+  - 背景: SDK Import/Export は 10MB 制限あり、signed URL は制限なし
 
 ### 観測性・運用性
 - [ ] メトリクス出力（read/write/stat/err カウンタ）

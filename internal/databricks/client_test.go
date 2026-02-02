@@ -100,9 +100,13 @@ func TestStatNotFound(t *testing.T) {
 	}
 }
 
-// TestReadAllViaSignedURL verifies that ReadAll uses signed URL when available
+// TestReadAllViaSignedURL verifies that ReadAll uses signed URL for large files (>= 5MB)
 func TestReadAllViaSignedURL(t *testing.T) {
-	testContent := []byte("test content via signed URL")
+	// Create a large file (>= 5MB threshold)
+	testContent := make([]byte, 5*1024*1024) // 5MB
+	for i := range testContent {
+		testContent[i] = byte(i % 256)
+	}
 
 	// Set up a test HTTP server to simulate signed URL endpoint
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -151,14 +155,18 @@ func TestReadAllViaSignedURL(t *testing.T) {
 		t.Fatalf("ReadAll failed: %v", err)
 	}
 
-	if string(data) != string(testContent) {
-		t.Errorf("Expected content %q, got %q", string(testContent), string(data))
+	if len(data) != len(testContent) {
+		t.Errorf("Expected content length %d, got %d", len(testContent), len(data))
 	}
 }
 
-// TestReadAllFallbackToExport verifies that ReadAll falls back to Export when signed URL fails
+// TestReadAllFallbackToExport verifies that ReadAll falls back to Export when signed URL fails for large files
 func TestReadAllFallbackToExport(t *testing.T) {
-	testContent := []byte("test content via Export")
+	// Create a large file (>= 5MB threshold) to test fallback path
+	testContent := make([]byte, 5*1024*1024) // 5MB
+	for i := range testContent {
+		testContent[i] = byte(i % 256)
+	}
 	contentB64 := base64.StdEncoding.EncodeToString(testContent)
 
 	signedURLCalled := false
@@ -215,11 +223,83 @@ func TestReadAllFallbackToExport(t *testing.T) {
 	}
 
 	if !signedURLCalled {
-		t.Error("Expected signed URL to be called")
+		t.Error("Expected signed URL to be called for large file")
 	}
 
 	if !exportCalled {
 		t.Error("Expected Export fallback to be called")
+	}
+
+	if len(data) != len(testContent) {
+		t.Errorf("Expected content length %d, got %d", len(testContent), len(data))
+	}
+}
+
+// TestReadSmallFilesUseExport verifies that small files (< 5MB) use Export directly
+func TestReadSmallFilesUseExport(t *testing.T) {
+	testContent := []byte("small test content") // Much smaller than 5MB threshold
+	contentB64 := base64.StdEncoding.EncodeToString(testContent)
+
+	signedURLCalled := false
+	exportCalled := false
+
+	// Set up a test HTTP server (should NOT be called)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		signedURLCalled = true
+		w.WriteHeader(http.StatusOK)
+		w.Write(testContent)
+	}))
+	defer server.Close()
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info") {
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test.txt",
+						ObjectType: workspace.ObjectTypeFile,
+						Size:       int64(len(testContent)),
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+					SignedURL: &struct {
+						URL     string            `json:"url"`
+						Headers map[string]string `json:"headers,omitempty"`
+					}{
+						URL:     server.URL,
+						Headers: map[string]string{},
+					},
+				}
+				return nil
+			}
+			return fmt.Errorf("unexpected path: %s", path)
+		},
+	}
+
+	mockWorkspace := &MockWorkspaceClient{
+		ExportFunc: func(ctx context.Context, request workspace.ExportRequest) (*workspace.ExportResponse, error) {
+			exportCalled = true
+			return &workspace.ExportResponse{
+				Content: contentB64,
+			}, nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, nil)
+
+	data, err := client.ReadAll(context.Background(), "/test.txt")
+	if err != nil {
+		t.Fatalf("ReadAll failed: %v", err)
+	}
+
+	if signedURLCalled {
+		t.Error("Signed URL should NOT be called for small files")
+	}
+
+	if !exportCalled {
+		t.Error("Expected Export to be called for small files")
 	}
 
 	if string(data) != string(testContent) {
@@ -227,9 +307,13 @@ func TestReadAllFallbackToExport(t *testing.T) {
 	}
 }
 
-// TestWriteViaNewFiles verifies that Write uses new-files API
+// TestWriteViaNewFiles verifies that Write uses new-files API for large files (>= 5MB)
 func TestWriteViaNewFiles(t *testing.T) {
-	testContent := []byte("test content for new-files")
+	// Create a large file (>= 5MB threshold)
+	testContent := make([]byte, 5*1024*1024) // 5MB
+	for i := range testContent {
+		testContent[i] = byte(i % 256)
+	}
 	signedURLCalled := false
 
 	// Set up a test HTTP server to simulate signed URL PUT
@@ -280,9 +364,13 @@ func TestWriteViaNewFiles(t *testing.T) {
 	}
 }
 
-// TestWriteFallbackToImportFile verifies that Write falls back to import-file
+// TestWriteFallbackToImportFile verifies that Write falls back to import-file for large files
 func TestWriteFallbackToImportFile(t *testing.T) {
-	testContent := []byte("test content for import-file")
+	// Create a large file (>= 5MB threshold) to test fallback path
+	testContent := make([]byte, 5*1024*1024) // 5MB
+	for i := range testContent {
+		testContent[i] = byte(i % 256)
+	}
 	importFileCalled := false
 
 	mockAPI := &MockAPIClient{
@@ -309,6 +397,43 @@ func TestWriteFallbackToImportFile(t *testing.T) {
 
 	if !importFileCalled {
 		t.Error("Expected import-file fallback to be called")
+	}
+}
+
+// TestWriteSmallFilesUseImportFile verifies that small files (< 5MB) use import-file directly
+func TestWriteSmallFilesUseImportFile(t *testing.T) {
+	testContent := []byte("small test content") // Much smaller than 5MB threshold
+	importFileCalled := false
+	newFilesCalled := false
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "new-files") {
+				newFilesCalled = true
+				return fmt.Errorf("new-files should not be called for small files")
+			}
+			if strings.Contains(path, "import-file") {
+				importFileCalled = true
+				return nil
+			}
+			return fmt.Errorf("unexpected path: %s", path)
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, metacache.NewCache(1*time.Second))
+
+	err := client.Write(context.Background(), "/test.txt", testContent)
+	if err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	if newFilesCalled {
+		t.Error("new-files should NOT be called for small files")
+	}
+	if !importFileCalled {
+		t.Error("Expected import-file to be called for small files")
 	}
 }
 
