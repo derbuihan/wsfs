@@ -19,6 +19,29 @@ type Entry struct {
 	Size       int64
 	ModTime    time.Time
 	AccessTime time.Time
+	Checksum   string // SHA256 hex string for integrity verification
+}
+
+// CalculateChecksum computes SHA256 checksum of data and returns hex string.
+// This is exported so it can be used by callers to verify cached data.
+func CalculateChecksum(data []byte) string {
+	hash := sha256.Sum256(data)
+	return hex.EncodeToString(hash[:])
+}
+
+// calculateFileChecksum computes SHA256 checksum of a file
+func calculateFileChecksum(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // DiskCache manages on-disk file caching with LRU and TTL eviction
@@ -80,37 +103,37 @@ func (c *DiskCache) IsDisabled() bool {
 }
 
 // Get retrieves a cached file if it exists and is valid
-// Returns localPath and true if cache hit, empty string and false if cache miss
+// Returns localPath, checksum, and true if cache hit; empty strings and false if cache miss
 // remoteModTime is used to validate cache freshness
-func (c *DiskCache) Get(remotePath string, remoteModTime time.Time) (string, bool) {
+func (c *DiskCache) Get(remotePath string, remoteModTime time.Time) (localPath string, checksum string, found bool) {
 	if c.disabled {
-		return "", false
+		return "", "", false
 	}
 
 	c.mu.RLock()
-	entry, found := c.entries[remotePath]
+	entry, ok := c.entries[remotePath]
 	c.mu.RUnlock()
 
-	if !found {
-		return "", false
+	if !ok {
+		return "", "", false
 	}
 
 	// Check TTL
 	if time.Since(entry.AccessTime) > c.ttl {
 		c.Delete(remotePath)
-		return "", false
+		return "", "", false
 	}
 
 	// Check if remote file was modified
 	if !remoteModTime.IsZero() && remoteModTime.After(entry.ModTime) {
 		c.Delete(remotePath)
-		return "", false
+		return "", "", false
 	}
 
 	// Check if local file still exists
 	if _, err := os.Stat(entry.LocalPath); err != nil {
 		c.Delete(remotePath)
-		return "", false
+		return "", "", false
 	}
 
 	// Update access time
@@ -118,7 +141,7 @@ func (c *DiskCache) Get(remotePath string, remoteModTime time.Time) (string, boo
 	entry.AccessTime = time.Now()
 	c.mu.Unlock()
 
-	return entry.LocalPath, true
+	return entry.LocalPath, entry.Checksum, true
 }
 
 // Set stores a file in the cache
@@ -144,6 +167,9 @@ func (c *DiskCache) Set(remotePath string, data []byte, remoteModTime time.Time)
 		return "", fmt.Errorf("failed to write cache file: %w", err)
 	}
 
+	// Calculate checksum for integrity verification
+	checksum := CalculateChecksum(data)
+
 	// Add entry
 	now := time.Now()
 	entry := &Entry{
@@ -152,6 +178,7 @@ func (c *DiskCache) Set(remotePath string, data []byte, remoteModTime time.Time)
 		Size:       size,
 		ModTime:    remoteModTime,
 		AccessTime: now,
+		Checksum:   checksum,
 	}
 
 	c.mu.Lock()
@@ -388,6 +415,13 @@ func (c *DiskCache) CopyToCache(remotePath string, srcPath string, remoteModTime
 		return "", fmt.Errorf("failed to copy file: %w", err)
 	}
 
+	// Calculate checksum after copy for integrity verification
+	checksum, err := calculateFileChecksum(localPath)
+	if err != nil {
+		os.Remove(localPath) // Clean up on error
+		return "", fmt.Errorf("failed to calculate checksum: %w", err)
+	}
+
 	// Add entry
 	now := time.Now()
 	entry := &Entry{
@@ -396,6 +430,7 @@ func (c *DiskCache) CopyToCache(remotePath string, srcPath string, remoteModTime
 		Size:       size,
 		ModTime:    remoteModTime,
 		AccessTime: now,
+		Checksum:   checksum,
 	}
 
 	c.mu.Lock()

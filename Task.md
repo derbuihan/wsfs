@@ -92,18 +92,23 @@
 
 ### P3-2: 書き込みバッファ方式の整理
 - [x] `Flush/Release` で確実に書き戻し（既存の実装で対応済み）
-- [ ] 破損時の回復パス（チェックサム検証、再取得/再アップロード）
+- [x] 破損時の回復パス（チェックサム検証、再取得/再アップロード）
+  - Entry に Checksum フィールド追加（SHA256 hex string）
+  - `CalculateChecksum()` / `calculateFileChecksum()` ヘルパー関数追加
+  - `Set()` / `CopyToCache()` でチェックサム計算・保存
+  - `Get()` がチェックサムを返却（3値返却に変更）
+  - `ensureDataLocked()` でチェックサム検証、不一致時はキャッシュ削除してリモートから再取得
 
 ### P3-3: キャッシュテスト実装
 - [x] 基本キャッシュ動作テスト (`scripts/cache_test.sh` - 9カテゴリ)
 - [x] キャッシュ同期テスト (`scripts/cache_sync_test.sh` - 4カテゴリ)
 - [x] Databricks CLI検証テスト (`scripts/databricks_cli_verification_test.sh` - 8検証シナリオ)
 - [x] 統合キャッシュテスト (`scripts/docker_cache_test.sh` - 4構成)
-- [x] Goユニットテスト (`internal/filecache/disk_cache_test.go` - 13テスト、100%カバレッジ)
+- [x] Goユニットテスト (`internal/filecache/disk_cache_test.go` - 18テスト)
 
 **完了条件**
 - ✅ P3-1: 完了。キャッシュON/OFFの切替可能。ディスクキャッシュが実装され、LRU + TTL エビクションが動作する。
-- ⏳ P3-2: 部分完了。Flush/Releaseは実装済み。破損検証は未実装（Phase 4で対応可能）。
+- ✅ P3-2: 完了。Flush/Releaseは実装済み。チェックサム検証による破損検出・自動回復が実装済み。
 - ✅ P3-3: 完了。すべてのキャッシュテストが実装され、Databricks公式CLIとの整合性検証も完了。
 
 ---

@@ -130,6 +130,14 @@ func hashStringToIno(s string) uint64 {
 	return sum
 }
 
+// truncateChecksum returns the first 8 characters of a checksum for logging
+func truncateChecksum(checksum string) string {
+	if len(checksum) > 8 {
+		return checksum[:8]
+	}
+	return checksum
+}
+
 // validateChildPath validates and constructs a child path, preventing path traversal attacks.
 // Returns the validated child path or an error if the name contains path traversal sequences.
 func validateChildPath(parentPath, childName string) (string, error) {
@@ -174,17 +182,26 @@ func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
 
 	// Try to get from cache first
 	if n.diskCache != nil && !n.diskCache.IsDisabled() {
-		cachedPath, found := n.diskCache.Get(remotePath, remoteModTime)
+		cachedPath, expectedChecksum, found := n.diskCache.Get(remotePath, remoteModTime)
 		if found {
 			// Read from cached file
 			data, err := os.ReadFile(cachedPath)
 			if err == nil {
-				logging.Debugf("Cache hit for %s", remotePath)
-				n.buf.Data = data
-				return 0
+				// Verify checksum for integrity
+				actualChecksum := filecache.CalculateChecksum(data)
+				if actualChecksum == expectedChecksum {
+					logging.Debugf("Cache hit for %s (checksum verified)", remotePath)
+					n.buf.Data = data
+					return 0
+				}
+				// Checksum mismatch - cache is corrupted
+				logging.Warnf("Cache corruption detected for %s (expected %s..., got %s...)",
+					remotePath, truncateChecksum(expectedChecksum), truncateChecksum(actualChecksum))
+				n.diskCache.Delete(remotePath)
+			} else {
+				// Cache read failed, fall through to remote read
+				logging.Debugf("Cache read failed for %s: %v", remotePath, err)
 			}
-			// Cache read failed, fall through to remote read
-			logging.Debugf("Cache read failed for %s: %v", remotePath, err)
 		}
 	}
 

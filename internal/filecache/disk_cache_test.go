@@ -55,7 +55,7 @@ func TestNewDisabledCache(t *testing.T) {
 	}
 
 	// Operations should not fail but should not cache anything
-	_, found := cache.Get("/test", time.Now())
+	_, _, found := cache.Get("/test", time.Now())
 	if found {
 		t.Error("Disabled cache should not return cached entries")
 	}
@@ -98,7 +98,7 @@ func TestDiskCacheBasicOperations(t *testing.T) {
 	}
 
 	// Test Get
-	cachedPath, found := cache.Get(remotePath, modTime)
+	cachedPath, _, found := cache.Get(remotePath, modTime)
 	if !found {
 		t.Error("Expected cache hit")
 	}
@@ -124,7 +124,7 @@ func TestDiskCacheMiss(t *testing.T) {
 	}
 
 	// Test cache miss
-	_, found := cache.Get("/nonexistent.txt", time.Now())
+	_, _, found := cache.Get("/nonexistent.txt", time.Now())
 	if found {
 		t.Error("Expected cache miss for nonexistent file")
 	}
@@ -147,14 +147,14 @@ func TestDiskCacheModTimeInvalidation(t *testing.T) {
 	}
 
 	// Should get cache hit with same modTime
-	_, found := cache.Get(remotePath, oldModTime)
+	_, _, found := cache.Get(remotePath, oldModTime)
 	if !found {
 		t.Error("Expected cache hit with same modTime")
 	}
 
 	// Should get cache miss with newer modTime (file was modified)
 	newModTime := time.Now()
-	_, found = cache.Get(remotePath, newModTime)
+	_, _, found = cache.Get(remotePath, newModTime)
 	if found {
 		t.Error("Expected cache miss with newer modTime")
 	}
@@ -177,7 +177,7 @@ func TestDiskCacheTTLExpiration(t *testing.T) {
 	}
 
 	// Should find immediately
-	_, found := cache.Get(remotePath, modTime)
+	_, _, found := cache.Get(remotePath, modTime)
 	if !found {
 		t.Error("Expected cache hit immediately")
 	}
@@ -186,7 +186,7 @@ func TestDiskCacheTTLExpiration(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 
 	// Should not find after TTL
-	_, found = cache.Get(remotePath, modTime)
+	_, _, found = cache.Get(remotePath, modTime)
 	if found {
 		t.Error("Expected cache miss after TTL expiration")
 	}
@@ -209,7 +209,7 @@ func TestDiskCacheDelete(t *testing.T) {
 	}
 
 	// Verify exists
-	_, found := cache.Get(remotePath, modTime)
+	_, _, found := cache.Get(remotePath, modTime)
 	if !found {
 		t.Error("Expected cache hit before delete")
 	}
@@ -221,7 +221,7 @@ func TestDiskCacheDelete(t *testing.T) {
 	}
 
 	// Verify deleted
-	_, found = cache.Get(remotePath, modTime)
+	_, _, found = cache.Get(remotePath, modTime)
 	if found {
 		t.Error("Expected cache miss after delete")
 	}
@@ -328,21 +328,21 @@ func TestDiskCacheLRUEviction(t *testing.T) {
 	}
 
 	// File 'a' should be evicted
-	_, found := cache.Get("/file/a.txt", modTime)
+	_, _, found := cache.Get("/file/a.txt", modTime)
 	if found {
 		t.Error("Expected oldest file to be evicted")
 	}
 
 	// Files b, c, d should still be cached
-	_, found = cache.Get("/file/b.txt", modTime)
+	_, _, found = cache.Get("/file/b.txt", modTime)
 	if !found {
 		t.Error("Expected file b to still be cached")
 	}
-	_, found = cache.Get("/file/c.txt", modTime)
+	_, _, found = cache.Get("/file/c.txt", modTime)
 	if !found {
 		t.Error("Expected file c to still be cached")
 	}
-	_, found = cache.Get(remotePath4, modTime)
+	_, _, found = cache.Get(remotePath4, modTime)
 	if !found {
 		t.Error("Expected new file d to be cached")
 	}
@@ -417,7 +417,7 @@ func TestDiskCacheCopyToCache(t *testing.T) {
 	}
 
 	// Verify cached
-	cachedPath, found := cache.Get(remotePath, modTime)
+	cachedPath, _, found := cache.Get(remotePath, modTime)
 	if !found {
 		t.Error("Expected cache hit after copy")
 	}
@@ -524,12 +524,178 @@ func TestLoadExistingEntries_CleansOrphanedFiles(t *testing.T) {
 		t.Fatalf("Set failed: %v", err)
 	}
 
-	cachedPath, found := cache.Get(remotePath, modTime)
+	cachedPath, _, found := cache.Get(remotePath, modTime)
 	if !found {
 		t.Error("Expected cache hit")
 	}
 	if cachedPath != localPath {
 		t.Errorf("Expected path %s, got %s", localPath, cachedPath)
+	}
+}
+
+func TestCalculateChecksum(t *testing.T) {
+	// Test basic checksum calculation
+	data := []byte("Hello, World!")
+	checksum := CalculateChecksum(data)
+
+	// SHA256 of "Hello, World!" should be consistent
+	if len(checksum) != 64 { // SHA256 hex string is 64 characters
+		t.Errorf("Expected checksum length 64, got %d", len(checksum))
+	}
+
+	// Same data should produce same checksum
+	checksum2 := CalculateChecksum(data)
+	if checksum != checksum2 {
+		t.Error("Same data should produce same checksum")
+	}
+
+	// Different data should produce different checksum
+	differentData := []byte("Hello, World!!")
+	differentChecksum := CalculateChecksum(differentData)
+	if checksum == differentChecksum {
+		t.Error("Different data should produce different checksum")
+	}
+
+	// Empty data should have a valid checksum
+	emptyChecksum := CalculateChecksum([]byte{})
+	if len(emptyChecksum) != 64 {
+		t.Errorf("Empty data checksum should be 64 chars, got %d", len(emptyChecksum))
+	}
+}
+
+func TestDiskCacheChecksumVerification(t *testing.T) {
+	tmpDir := t.TempDir()
+	cache, err := NewDiskCache(tmpDir, 1024*1024, 1*time.Hour)
+	if err != nil {
+		t.Fatalf("NewDiskCache failed: %v", err)
+	}
+
+	testData := []byte("test data for checksum verification")
+	remotePath := "/checksum_test.txt"
+	modTime := time.Now()
+
+	// Set data
+	localPath, err := cache.Set(remotePath, testData, modTime)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	// Get should return correct checksum
+	cachedPath, checksum, found := cache.Get(remotePath, modTime)
+	if !found {
+		t.Fatal("Expected cache hit")
+	}
+	if cachedPath != localPath {
+		t.Errorf("Expected path %s, got %s", localPath, cachedPath)
+	}
+
+	// Verify checksum matches what we'd calculate
+	expectedChecksum := CalculateChecksum(testData)
+	if checksum != expectedChecksum {
+		t.Errorf("Expected checksum %s, got %s", expectedChecksum, checksum)
+	}
+
+	// Read actual file and verify checksum
+	actualData, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("Failed to read cache file: %v", err)
+	}
+	actualChecksum := CalculateChecksum(actualData)
+	if actualChecksum != checksum {
+		t.Errorf("File checksum mismatch: expected %s, got %s", checksum, actualChecksum)
+	}
+}
+
+func TestDiskCacheCopyToCacheChecksum(t *testing.T) {
+	tmpDir := t.TempDir()
+	cache, err := NewDiskCache(tmpDir, 1024*1024, 1*time.Hour)
+	if err != nil {
+		t.Fatalf("NewDiskCache failed: %v", err)
+	}
+
+	// Create a temp file
+	srcFile := filepath.Join(tmpDir, "source.txt")
+	testData := []byte("test data for CopyToCache checksum")
+	if err := os.WriteFile(srcFile, testData, 0644); err != nil {
+		t.Fatalf("Failed to create source file: %v", err)
+	}
+
+	remotePath := "/copy_checksum_test.txt"
+	modTime := time.Now()
+
+	// Copy to cache
+	localPath, err := cache.CopyToCache(remotePath, srcFile, modTime)
+	if err != nil {
+		t.Fatalf("CopyToCache failed: %v", err)
+	}
+
+	// Get should return correct checksum
+	cachedPath, checksum, found := cache.Get(remotePath, modTime)
+	if !found {
+		t.Fatal("Expected cache hit after copy")
+	}
+	if cachedPath != localPath {
+		t.Errorf("Expected path %s, got %s", localPath, cachedPath)
+	}
+
+	// Verify checksum matches original data
+	expectedChecksum := CalculateChecksum(testData)
+	if checksum != expectedChecksum {
+		t.Errorf("Expected checksum %s, got %s", expectedChecksum, checksum)
+	}
+}
+
+func TestDiskCacheCorruptionDetection(t *testing.T) {
+	tmpDir := t.TempDir()
+	cache, err := NewDiskCache(tmpDir, 1024*1024, 1*time.Hour)
+	if err != nil {
+		t.Fatalf("NewDiskCache failed: %v", err)
+	}
+
+	testData := []byte("original data")
+	remotePath := "/corruption_test.txt"
+	modTime := time.Now()
+
+	// Set data
+	localPath, err := cache.Set(remotePath, testData, modTime)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	// Get checksum before corruption
+	_, originalChecksum, found := cache.Get(remotePath, modTime)
+	if !found {
+		t.Fatal("Expected cache hit")
+	}
+
+	// Corrupt the cache file
+	corruptedData := []byte("corrupted!!")
+	if err := os.WriteFile(localPath, corruptedData, 0600); err != nil {
+		t.Fatalf("Failed to corrupt cache file: %v", err)
+	}
+
+	// Get should still return the entry (cache doesn't detect corruption on Get)
+	// Corruption is detected by caller who verifies checksum
+	_, checksum, found := cache.Get(remotePath, modTime)
+	if !found {
+		t.Fatal("Expected cache hit (Get doesn't verify content)")
+	}
+
+	// Checksum from Get should be the ORIGINAL checksum (from entry metadata)
+	if checksum != originalChecksum {
+		t.Error("Checksum in entry should not change when file is corrupted")
+	}
+
+	// Read the corrupted file and verify checksum mismatch
+	actualData, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("Failed to read cache file: %v", err)
+	}
+	actualChecksum := CalculateChecksum(actualData)
+
+	// The actual file checksum should NOT match the stored checksum
+	if actualChecksum == checksum {
+		t.Error("Corrupted file should have different checksum")
 	}
 }
 
@@ -570,7 +736,7 @@ func BenchmarkDiskCacheGet(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, found := cache.Get(remotePath, modTime)
+		_, _, found := cache.Get(remotePath, modTime)
 		if !found {
 			b.Fatal("Expected cache hit")
 		}

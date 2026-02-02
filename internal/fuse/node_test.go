@@ -3,6 +3,7 @@ package fuse
 import (
 	"context"
 	"io/fs"
+	"os"
 	"syscall"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 
 	"wsfs/internal/databricks"
+	"wsfs/internal/filecache"
 )
 
 func TestWSNodeTruncateLockedShrinks(t *testing.T) {
@@ -1017,5 +1019,134 @@ func TestValidateChildPath(t *testing.T) {
 				t.Errorf("validateChildPath() = %q, want %q", gotPath, tt.wantPath)
 			}
 		})
+	}
+}
+
+// ============================================================================
+// Cache Corruption Recovery Tests
+// ============================================================================
+
+// TestEnsureDataLockedWithCorruptedCache verifies that ensureDataLocked detects
+// corrupted cache entries and recovers by re-fetching from remote
+func TestEnsureDataLockedWithCorruptedCache(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a real disk cache
+	cache, err := filecache.NewDiskCache(tmpDir, 1024*1024, 1*time.Hour)
+	if err != nil {
+		t.Fatalf("Failed to create disk cache: %v", err)
+	}
+
+	originalData := []byte("original content from remote")
+	remotePath := "/test/file.txt"
+	modTime := time.Now()
+
+	// Pre-populate cache with correct data
+	localPath, err := cache.Set(remotePath, originalData, modTime)
+	if err != nil {
+		t.Fatalf("Failed to set cache: %v", err)
+	}
+
+	// Create the API mock that returns fresh data when called
+	freshData := []byte("fresh content from remote")
+	readAllCalled := false
+	api := &databricks.FakeWorkspaceAPI{
+		ReadAllFunc: func(ctx context.Context, filePath string) ([]byte, error) {
+			readAllCalled = true
+			return freshData, nil
+		},
+	}
+
+	// Create node with cache
+	n := &WSNode{
+		wfClient:  api,
+		diskCache: cache,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       remotePath,
+			Size:       int64(len(originalData)),
+			ModifiedAt: modTime.UnixMilli(),
+		}},
+	}
+
+	// Corrupt the cache file
+	corruptedData := []byte("CORRUPTED!")
+	if err := os.WriteFile(localPath, corruptedData, 0600); err != nil {
+		t.Fatalf("Failed to corrupt cache file: %v", err)
+	}
+
+	// Call ensureDataLocked - should detect corruption and fetch from remote
+	errno := n.ensureDataLocked(context.Background())
+	if errno != 0 {
+		t.Fatalf("ensureDataLocked failed with errno: %d", errno)
+	}
+
+	// Verify that ReadAll was called (recovery from corruption)
+	if !readAllCalled {
+		t.Error("Expected ReadAll to be called after cache corruption detected")
+	}
+
+	// Verify that buffer has fresh data from remote
+	if string(n.buf.Data) != string(freshData) {
+		t.Errorf("Expected buffer to have fresh data %q, got %q", string(freshData), string(n.buf.Data))
+	}
+}
+
+// TestEnsureDataLockedWithValidCache verifies that ensureDataLocked uses cache
+// when checksum is valid
+func TestEnsureDataLockedWithValidCache(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a real disk cache
+	cache, err := filecache.NewDiskCache(tmpDir, 1024*1024, 1*time.Hour)
+	if err != nil {
+		t.Fatalf("Failed to create disk cache: %v", err)
+	}
+
+	cachedData := []byte("cached content")
+	remotePath := "/test/file.txt"
+	modTime := time.Now()
+
+	// Pre-populate cache
+	_, err = cache.Set(remotePath, cachedData, modTime)
+	if err != nil {
+		t.Fatalf("Failed to set cache: %v", err)
+	}
+
+	// Create the API mock - should NOT be called
+	readAllCalled := false
+	api := &databricks.FakeWorkspaceAPI{
+		ReadAllFunc: func(ctx context.Context, filePath string) ([]byte, error) {
+			readAllCalled = true
+			return []byte("this should not be returned"), nil
+		},
+	}
+
+	// Create node with cache
+	n := &WSNode{
+		wfClient:  api,
+		diskCache: cache,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       remotePath,
+			Size:       int64(len(cachedData)),
+			ModifiedAt: modTime.UnixMilli(),
+		}},
+	}
+
+	// Call ensureDataLocked - should use cache
+	errno := n.ensureDataLocked(context.Background())
+	if errno != 0 {
+		t.Fatalf("ensureDataLocked failed with errno: %d", errno)
+	}
+
+	// Verify that ReadAll was NOT called (cache hit)
+	if readAllCalled {
+		t.Error("Expected ReadAll NOT to be called when cache is valid")
+	}
+
+	// Verify that buffer has cached data
+	if string(n.buf.Data) != string(cachedData) {
+		t.Errorf("Expected buffer to have cached data %q, got %q", string(cachedData), string(n.buf.Data))
 	}
 }
