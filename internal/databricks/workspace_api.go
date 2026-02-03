@@ -16,4 +16,5 @@ type WorkspaceFilesAPI interface {
 	Mkdir(ctx context.Context, dirPath string) error
 	Rename(ctx context.Context, sourcePath string, destinationPath string) error
 	CacheSet(path string, info fs.FileInfo)
+	CacheInvalidate(filePath string)
 }

@@ -528,6 +528,10 @@ func (c *WorkspaceFilesClient) CacheSet(filePath string, info fs.FileInfo) {
 	c.cache.Set(filePath, info)
 }
 
+func (c *WorkspaceFilesClient) CacheInvalidate(filePath string) {
+	c.cache.Invalidate(filePath)
+}
+
 func (c *WorkspaceFilesClient) Exists(ctx context.Context, path string) (bool, error) {
 	_, err := c.Stat(ctx, path)
 	if err != nil {

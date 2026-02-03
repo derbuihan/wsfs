@@ -357,9 +357,20 @@ func (n *WSNode) fillAttr(ctx context.Context, out *fuse.Attr) {
 }
 
 func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
 	logging.Debugf("Getattr called on path: %s", n.Path())
 
 	n.fillAttr(ctx, &out.Attr)
+
+	// When buffer is dirty, use local buffer size to ensure consistency
+	// This prevents race conditions where stat sees intermediate state
+	if n.buf.Dirty && n.buf.Data != nil {
+		out.Attr.Size = uint64(len(n.buf.Data))
+		out.Attr.Blocks = (out.Attr.Size + blockFactor - 1) / blockFactor
+	}
+
 	out.SetTimeout(attrTimeoutSec)
 
 	return 0
@@ -454,9 +465,10 @@ func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttr
 	}
 
 	if sizeChanged {
-		if errno := n.flushLocked(ctx); errno != 0 {
-			return errno
-		}
+		// Defer flush to Flush/Release/Fsync to avoid race condition
+		// where stat polling retrieves intermediate empty data from Databricks.
+		// Invalidate metadata cache to prevent stale reads.
+		n.wfClient.CacheInvalidate(n.Path())
 	} else if mtime != nil {
 		n.wfClient.CacheSet(n.Path(), n.fileInfo)
 	}
@@ -508,6 +520,31 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	if err != nil {
 		logging.Debugf("Lookup: invalid path: %v", err)
 		return nil, syscall.EINVAL
+	}
+
+	// Check if we already have this inode with a dirty buffer.
+	// If so, use its state instead of fetching from Databricks to avoid
+	// race conditions where stat sees intermediate state during writes.
+	existingChild := n.GetChild(name)
+	if existingChild != nil {
+		existingNode, ok := existingChild.Operations().(*WSNode)
+		if ok {
+			existingNode.mu.Lock()
+			if existingNode.buf.Dirty {
+				// Use existing node's state - it has uncommitted changes
+				existingNode.fillAttr(ctx, &out.Attr)
+				if existingNode.buf.Data != nil {
+					out.Attr.Size = uint64(len(existingNode.buf.Data))
+					out.Attr.Blocks = (out.Attr.Size + blockFactor - 1) / blockFactor
+				}
+				existingNode.mu.Unlock()
+				out.SetEntryTimeout(entryTimeoutSec)
+				out.SetAttrTimeout(attrTimeoutSec)
+				logging.Debugf("Lookup: returning existing dirty node for %s", childPath)
+				return existingChild, 0
+			}
+			existingNode.mu.Unlock()
+		}
 	}
 
 	opCtx, cancel := context.WithTimeout(ctx, metadataOpTimeout)

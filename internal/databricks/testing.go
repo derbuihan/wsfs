@@ -20,7 +20,8 @@ type FakeWorkspaceAPI struct {
 	DeleteFunc  func(ctx context.Context, filePath string, recursive bool) error
 	MkdirFunc   func(ctx context.Context, dirPath string) error
 	RenameFunc  func(ctx context.Context, sourcePath string, destinationPath string) error
-	CacheSetFunc func(path string, info fs.FileInfo)
+	CacheSetFunc        func(path string, info fs.FileInfo)
+	CacheInvalidateFunc func(filePath string)
 }
 
 func (f *FakeWorkspaceAPI) Stat(ctx context.Context, filePath string) (fs.FileInfo, error) {
@@ -75,6 +76,12 @@ func (f *FakeWorkspaceAPI) Rename(ctx context.Context, sourcePath string, destin
 func (f *FakeWorkspaceAPI) CacheSet(path string, info fs.FileInfo) {
 	if f.CacheSetFunc != nil {
 		f.CacheSetFunc(path, info)
+	}
+}
+
+func (f *FakeWorkspaceAPI) CacheInvalidate(filePath string) {
+	if f.CacheInvalidateFunc != nil {
+		f.CacheInvalidateFunc(filePath)
 	}
 }
 
