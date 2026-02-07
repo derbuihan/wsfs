@@ -328,6 +328,145 @@ func TestWSNodeRelease(t *testing.T) {
 	}
 }
 
+// TestOpenReleaseFlushesWhenLastHandleClosed verifies flush happens only on last close.
+func TestOpenReleaseFlushesWhenLastHandleClosed(t *testing.T) {
+	var writeCalls int
+	var lastWrittenSize int64
+	api := &databricks.FakeWorkspaceAPI{
+		WriteFunc: func(ctx context.Context, filepath string, data []byte) error {
+			writeCalls++
+			lastWrittenSize = int64(len(data))
+			return nil
+		},
+		StatFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			return databricks.NewTestFileInfo(filePath, lastWrittenSize, false), nil
+		},
+	}
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+		}},
+		buf: fileBuffer{Data: []byte("dirty")},
+	}
+
+	n.mu.Lock()
+	n.markDirtyLocked(dirtyData)
+	n.mu.Unlock()
+
+	if _, _, errno := n.Open(context.Background(), 0); errno != 0 {
+		t.Fatalf("Open failed with errno: %d", errno)
+	}
+	if _, _, errno := n.Open(context.Background(), 0); errno != 0 {
+		t.Fatalf("Open failed with errno: %d", errno)
+	}
+
+	if writeCalls != 0 {
+		t.Fatalf("Expected no writes before release, got %d", writeCalls)
+	}
+
+	if errno := n.Release(context.Background(), nil); errno != 0 {
+		t.Fatalf("Release failed with errno: %d", errno)
+	}
+	if writeCalls != 0 {
+		t.Fatalf("Expected no writes after first release, got %d", writeCalls)
+	}
+
+	if errno := n.Release(context.Background(), nil); errno != 0 {
+		t.Fatalf("Release failed with errno: %d", errno)
+	}
+	if writeCalls != 1 {
+		t.Fatalf("Expected 1 write after last release, got %d", writeCalls)
+	}
+}
+
+func TestFlushSkipsWhenOpenCountPositive(t *testing.T) {
+	var writeCalls int
+	var lastWrittenSize int64
+	api := &databricks.FakeWorkspaceAPI{
+		WriteFunc: func(ctx context.Context, filepath string, data []byte) error {
+			writeCalls++
+			lastWrittenSize = int64(len(data))
+			return nil
+		},
+		StatFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			return databricks.NewTestFileInfo(filePath, lastWrittenSize, false), nil
+		},
+	}
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+		}},
+		buf: fileBuffer{Data: []byte("dirty")},
+	}
+
+	n.mu.Lock()
+	n.markDirtyLocked(dirtyData)
+	n.mu.Unlock()
+
+	if _, _, errno := n.Open(context.Background(), 0); errno != 0 {
+		t.Fatalf("Open failed with errno: %d", errno)
+	}
+
+	if errno := n.Flush(context.Background(), nil); errno != 0 {
+		t.Fatalf("Flush failed with errno: %d", errno)
+	}
+	if writeCalls != 0 {
+		t.Fatalf("Expected no writes while openCount > 0, got %d", writeCalls)
+	}
+
+	if errno := n.Release(context.Background(), nil); errno != 0 {
+		t.Fatalf("Release failed with errno: %d", errno)
+	}
+	if writeCalls != 1 {
+		t.Fatalf("Expected 1 write after release, got %d", writeCalls)
+	}
+}
+
+func TestFsyncFlushesEvenWithOpenCount(t *testing.T) {
+	var writeCalls int
+	var lastWrittenSize int64
+	api := &databricks.FakeWorkspaceAPI{
+		WriteFunc: func(ctx context.Context, filepath string, data []byte) error {
+			writeCalls++
+			lastWrittenSize = int64(len(data))
+			return nil
+		},
+		StatFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			return databricks.NewTestFileInfo(filePath, lastWrittenSize, false), nil
+		},
+	}
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+		}},
+		buf: fileBuffer{Data: []byte("dirty")},
+	}
+
+	n.mu.Lock()
+	n.markDirtyLocked(dirtyData)
+	n.mu.Unlock()
+
+	if _, _, errno := n.Open(context.Background(), 0); errno != 0 {
+		t.Fatalf("Open failed with errno: %d", errno)
+	}
+
+	if errno := n.Fsync(context.Background(), nil, 0); errno != 0 {
+		t.Fatalf("Fsync failed with errno: %d", errno)
+	}
+	if writeCalls != 1 {
+		t.Fatalf("Expected 1 write after fsync, got %d", writeCalls)
+	}
+	if n.buf.Dirty {
+		t.Fatal("Expected dirty flag to be cleared after fsync")
+	}
+}
+
 // TestWSNodeFsync tests that Fsync works like Flush
 func TestWSNodeFsync(t *testing.T) {
 	var writtenData []byte
@@ -399,6 +538,48 @@ func TestWSNodeSetattr(t *testing.T) {
 	}
 	if out.Size != 5 {
 		t.Errorf("Expected size 5, got %d", out.Size)
+	}
+}
+
+// TestSetattrTruncateWithoutOpenFlushes ensures truncate without open handle flushes immediately.
+func TestSetattrTruncateWithoutOpenFlushes(t *testing.T) {
+	var writeCalls int
+	api := &databricks.FakeWorkspaceAPI{
+		WriteFunc: func(ctx context.Context, filepath string, data []byte) error {
+			writeCalls++
+			if len(data) != 0 {
+				t.Fatalf("expected empty write, got %d bytes", len(data))
+			}
+			return nil
+		},
+		StatFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			return databricks.NewTestFileInfo(filePath, 0, false), nil
+		},
+		CacheInvalidateFunc: func(filePath string) {},
+	}
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+			Size:       5,
+		}},
+	}
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_SIZE
+	in.Size = 0
+	out := &fuse.AttrOut{}
+
+	errno := n.Setattr(context.Background(), nil, in, out)
+	if errno != 0 {
+		t.Fatalf("Setattr failed with errno: %d", errno)
+	}
+	if out.Size != 0 {
+		t.Errorf("Expected size 0, got %d", out.Size)
+	}
+	if writeCalls != 1 {
+		t.Fatalf("Expected 1 write call, got %d", writeCalls)
 	}
 }
 

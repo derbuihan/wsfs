@@ -341,6 +341,24 @@ if command -v databricks >/dev/null 2>&1 && [ -n "${DATABRICKS_HOST:-}" ] && [ -
   # Create a file via wsfs
   TEST_CONTENT="CLI verification test $(date +%s)"
   echo "$TEST_CONTENT" > cli_verify.txt
+  # Ensure data is flushed to remote before CLI read
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - <<'PY'
+import os
+with open("cli_verify.txt", "r+") as f:
+    f.flush()
+    os.fsync(f.fileno())
+PY
+  elif command -v python >/dev/null 2>&1; then
+    python - <<'PY'
+import os
+with open("cli_verify.txt", "r+") as f:
+    f.flush()
+    os.fsync(f.fileno())
+PY
+  else
+    sync
+  fi
 
   sleep 2
 

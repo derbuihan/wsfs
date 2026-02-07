@@ -6,7 +6,7 @@ AI coding agent guidance for this repo.
 1. Confirm `Task.md` and select the task to work on.
 2. Implement the task.
 3. Run tests to confirm no regression.
-   - Always run `scripts/fuse_test.sh` after implementation. If it fails, fix the failing part.
+   - Always run `scripts/tests/fuse_test.sh` after implementation. If it fails, fix the failing part.
 4. Update `Task.md` when progress changes.
 
 ## Project overview
@@ -53,6 +53,28 @@ Docker (macOS recommended):
 docker compose run --rm --build wsfs-test
 ```
 
+Debugging failing shell tests (Docker):
+- If a shell test fails, re-run that script directly in a Docker container to isolate the failure.
+```bash
+docker compose run --rm wsfs-test bash -c '
+  set -e
+  go build -o /tmp/wsfs ./cmd/wsfs
+  mkdir -p /mnt/wsfs /tmp/wsfs-cache
+  /tmp/wsfs --debug --cache=true --cache-dir=/tmp/wsfs-cache --cache-ttl=24h /mnt/wsfs > /tmp/wsfs.log 2>&1 &
+  WSFS_PID=$!
+  for i in $(seq 1 30); do
+    if grep -q " /mnt/wsfs " /proc/mounts 2>/dev/null; then break; fi
+    sleep 1
+  done
+  ./scripts/tests/fuse_test.sh /mnt/wsfs
+  TEST_RESULT=$?
+  fusermount3 -u /mnt/wsfs || fusermount -u /mnt/wsfs || umount /mnt/wsfs || true
+  kill $WSFS_PID 2>/dev/null || true
+  exit $TEST_RESULT
+'
+```
+- When needed, replace `./scripts/tests/fuse_test.sh /mnt/wsfs` with a smaller failing script or a minimal inline repro to narrow down the root cause.
+
 Linux (direct):
 ```bash
 sudo apt-get update
@@ -62,7 +84,7 @@ echo 'user_allow_other' | sudo tee -a /etc/fuse.conf
 mkdir -p /mnt/wsfs
 go build -o tmp/wsfs
 ./tmp/wsfs /mnt/wsfs &
-./scripts/fuse_test.sh /mnt/wsfs
+./scripts/tests/fuse_test.sh /mnt/wsfs
 fusermount3 -u /mnt/wsfs
 ```
 

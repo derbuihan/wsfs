@@ -65,7 +65,7 @@ func (r *DirtyNodeRegistry) FlushAll(ctx context.Context) (int, []error) {
 		logging.Debugf("Flushing dirty buffer for: %s", node.Path())
 
 		node.mu.Lock()
-		if node.buf.Dirty {
+		if node.isDirtyLocked() {
 			errno := node.flushLocked(ctx)
 			if errno != 0 {
 				errors = append(errors, fmt.Errorf("flush %s: errno %d", node.Path(), errno))
