@@ -14,7 +14,7 @@ builds:
       - -trimpath
     ldflags:
       - -s -w
-      - -X main.version={{ .Version }}
+      - -X main.version={{ .ShortCommit }}
       - -X main.commit={{ .ShortCommit }}
       - -X main.date={{ .Date }}
     goos:
@@ -30,6 +30,7 @@ archives:
 
 nfpms:
   - package_name: wsfs
+    file_name_template: 'wsfs_{{ .ShortCommit }}_linux_{{ .Arch }}'
     formats:
       - deb
     dependencies:
@@ -45,7 +46,7 @@ checksum:
   algorithm: sha256
 
 snapshot:
-  version_template: '0.0.0~{{ .ShortCommit }}'
+  version_template: '1~{{ .ShortCommit }}'
 
 release:
   disable: true

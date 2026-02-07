@@ -12,6 +12,7 @@
 - [x] docs/ 配下の整理
 - [x] VSCode test-electron 統合試験（Core開発ループ、TS実装）
 - [x] ユニットテストの拡充とカバレッジ改善（fuse/retry/databricks/filecache/logging/CLI）
+- [x] リリース成果物のバージョン表記をコミットハッシュに変更
 
 ---
 
