@@ -1,0 +1,15 @@
+[Unit]
+Description=Databricks Workspace FS (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/wsfs/%i.env
+ExecStartPre=/usr/bin/mkdir -p ${WSFS_MOUNT}
+ExecStart=/usr/bin/wsfs ${WSFS_OPTS} ${WSFS_MOUNT}
+Restart=on-failure
+TimeoutStopSec=40
+
+[Install]
+WantedBy=default.target

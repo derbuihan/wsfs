@@ -28,12 +28,24 @@ archives:
   - formats: ["tar.gz"]
     name_template: 'wsfs_{{ .Os }}_{{ .Arch }}'
 
+nfpms:
+  - package_name: wsfs
+    formats:
+      - deb
+    dependencies:
+      - fuse3
+    contents:
+      - src: packaging/systemd/wsfs@.service
+        dst: /usr/lib/systemd/user/wsfs@.service
+      - src: packaging/systemd/wsfs.env.example
+        dst: /usr/share/doc/wsfs/wsfs.env.example
+
 checksum:
   name_template: 'wsfs_SHA256SUMS'
   algorithm: sha256
 
 snapshot:
-  version_template: '{{ .ShortCommit }}'
+  version_template: '0.0.0~{{ .ShortCommit }}'
 
 release:
   disable: true

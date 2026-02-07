@@ -31,7 +31,7 @@
 ### 配布
 
 - [ ] GitHub Actions でバイナリ配布（goreleaser）
-- [ ] brew / .deb パッケージ対応
+- [x] .deb パッケージ対応（brewなし）
 
 ### ドキュメント
 

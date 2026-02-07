@@ -38,7 +38,7 @@ export DATABRICKS_HOST=<your-databricks-workspace-url>
 export DATABRICKS_TOKEN=<your-personal-access-token>
 ```
 
-3. Run the application with the desired mount point.
+3. Run the application with the desired mount point (manual runs expect `.env` in the repo root).
 
 ```bash
 $ source .env
@@ -53,6 +53,26 @@ $ cd <mount-point>
 $ ls
 Repos  Shared  Users
 ```
+
+## Debian/Ubuntu (.deb)
+
+1. Download the latest `.deb` from GitHub Releases and install it.
+
+```bash
+$ sudo dpkg -i wsfs_*.deb
+```
+
+2. Create a systemd user env file (no `export` lines) and enable the service.
+
+```bash
+$ mkdir -p ~/.config/wsfs
+$ cp /usr/share/doc/wsfs/wsfs.env.example ~/.config/wsfs/dev.env
+$ $EDITOR ~/.config/wsfs/dev.env
+$ systemctl --user daemon-reload
+$ systemctl --user enable --now wsfs@dev
+```
+
+**Update:** download a newer `.deb` and run `dpkg -i` again (manual updates).
 
 ## Security Considerations
 

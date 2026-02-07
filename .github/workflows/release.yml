@@ -58,7 +58,7 @@ jobs:
 
       - name: Create latest release
         run: |
-          gh release create latest dist/*.tar.gz dist/*SHA256SUMS \
+          gh release create latest dist/*.tar.gz dist/*.deb dist/*SHA256SUMS \
             --title "Latest Release" \
             --notes "Built from main branch ($(git rev-parse --short HEAD))" \
             --prerelease
