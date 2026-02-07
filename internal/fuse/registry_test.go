@@ -2,7 +2,12 @@ package fuse
 
 import (
 	"context"
+	"errors"
 	"testing"
+
+	"github.com/databricks/databricks-sdk-go/service/workspace"
+
+	"wsfs/internal/databricks"
 )
 
 func TestDirtyNodeRegistry_RegisterUnregister(t *testing.T) {
@@ -102,5 +107,32 @@ func TestDirtyNodeRegistry_FlushAll_CancelledContext(t *testing.T) {
 	}
 	if len(errors) != 1 {
 		t.Errorf("Expected 1 error (context cancelled), got %d", len(errors))
+	}
+}
+
+func TestDirtyNodeRegistry_FlushAll_Errors(t *testing.T) {
+	registry := NewDirtyNodeRegistry()
+
+	api := &databricks.FakeWorkspaceAPI{
+		WriteFunc: func(ctx context.Context, filepath string, data []byte) error {
+			return errors.New("write error")
+		},
+	}
+	node := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+		}},
+		buf: fileBuffer{Data: []byte("data"), Dirty: true},
+	}
+	registry.Register(node)
+
+	flushed, errs := registry.FlushAll(context.Background())
+	if flushed != 0 {
+		t.Errorf("Expected 0 flushed, got %d", flushed)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("Expected 1 error, got %d", len(errs))
 	}
 }

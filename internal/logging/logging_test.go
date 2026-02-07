@@ -1,6 +1,9 @@
 package logging
 
 import (
+	"bytes"
+	"log"
+	"strings"
 	"testing"
 )
 
@@ -106,5 +109,67 @@ func TestLogLevelOrdering(t *testing.T) {
 	}
 	if !(LevelWarn < LevelError) {
 		t.Error("LevelWarn should be less than LevelError")
+	}
+}
+
+func TestLoggingOutputByLevel(t *testing.T) {
+	origLevel := Level
+	origDebugLogs := DebugLogs
+	origOutput := log.Writer()
+	origFlags := log.Flags()
+	t.Cleanup(func() {
+		Level = origLevel
+		DebugLogs = origDebugLogs
+		log.SetOutput(origOutput)
+		log.SetFlags(origFlags)
+	})
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+
+	SetLevel(LevelInfo)
+	Debugf("debug")
+	Infof("info")
+	Warnf("warn")
+	Errorf("error")
+
+	output := buf.String()
+	if strings.Contains(output, "[DEBUG]") {
+		t.Fatal("expected debug log to be suppressed")
+	}
+	if !strings.Contains(output, "[INFO] info") {
+		t.Fatal("expected info log")
+	}
+	if !strings.Contains(output, "[WARN] warn") {
+		t.Fatal("expected warn log")
+	}
+	if !strings.Contains(output, "[ERROR] error") {
+		t.Fatal("expected error log")
+	}
+}
+
+func TestLoggingDebugEnabled(t *testing.T) {
+	origLevel := Level
+	origDebugLogs := DebugLogs
+	origOutput := log.Writer()
+	origFlags := log.Flags()
+	t.Cleanup(func() {
+		Level = origLevel
+		DebugLogs = origDebugLogs
+		log.SetOutput(origOutput)
+		log.SetFlags(origFlags)
+	})
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+
+	Level = LevelInfo
+	DebugLogs = true
+	Debugf("debug")
+
+	if !strings.Contains(buf.String(), "[DEBUG] debug") {
+		t.Fatal("expected debug log when DebugLogs enabled")
 	}
 }

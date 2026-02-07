@@ -60,17 +60,17 @@ Repos  Shared  Users
 
 ### Single-User Environment
 
-wsfs does not implement access control. The `Access()` system call always permits all operations. This means:
+By default, wsfs restricts access to the mount owner. This is enforced by the kernel (without `--allow-other`) and by wsfs's `Access()` check. This means:
 
-- All local users can read/write files through the mount point
+- Only the user who mounted wsfs can read/write files through the mount point
 - Operations use the Databricks token owner's permissions
-- There is no UID/GID-based access restriction
+- Access is restricted by UID when `--allow-other` is **not** set
 
-**Recommendation:** Use wsfs only on machines where you are the sole user.
+**Recommendation:** Use wsfs only on machines where you are the sole user, or explicitly enable access for others with `--allow-other` if you understand the risks.
 
 ### The `--allow-other` Flag
 
-By default, only the user who mounted wsfs can access the mount point. The `--allow-other` flag allows other users to access it.
+By default, only the user who mounted wsfs can access the mount point. The `--allow-other` flag allows other local users to access it, and wsfs does not restrict access by UID when it is enabled.
 
 **Warning:** Do NOT use `--allow-other` unless absolutely necessary. When enabled:
 - All local users gain access to your Databricks workspace
