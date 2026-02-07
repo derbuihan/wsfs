@@ -171,6 +171,9 @@ go test ./...
 # Integration tests via Docker (Mac)
 ./scripts/run_tests_docker.sh
 
+# VSCode integration tests via Docker (Core dev loop)
+./scripts/run_vscode_tests_docker.sh
+
 # Integration tests on Linux (requires mounted wsfs)
 ./scripts/run_tests.sh /mnt/wsfs
 ```
@@ -187,6 +190,7 @@ go test ./...
 | **Cache tests** | `scripts/tests/cache_test.sh` | Cache hit/miss, invalidation, TTL behavior |
 | **Stress tests** | `scripts/tests/stress_test.sh` | Concurrent access, rapid truncate, rename |
 | **Config tests** | `scripts/tests/cache_config_test.sh` | Cache disabled mode, permissions, short TTL |
+| **VSCode core dev loop** | `scripts/run_vscode_tests_docker.sh` | One VSCode session covering edit/save/search/rename/terminal/Python run |
 
 ### Test Options
 

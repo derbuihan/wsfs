@@ -10,6 +10,7 @@
 - [x] Renameのサブツリー更新
 - [x] サイズベース API 選択戦略（5MB）
 - [x] docs/ 配下の整理
+- [x] VSCode test-electron 統合試験（Core開発ループ、TS実装）
 
 ---
 

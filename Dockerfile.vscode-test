@@ -1,0 +1,39 @@
+FROM golang:1.22-bookworm
+
+RUN apt-get update \
+  && apt-get install -y \
+    fuse3 \
+    curl \
+    unzip \
+    python3 \
+    xvfb \
+    ca-certificates \
+    gnupg \
+    libgtk-3-0 \
+    libnss3 \
+    libx11-xcb1 \
+    libxss1 \
+    libasound2 \
+    libgbm1 \
+    libxshmfence1 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libdrm2 \
+    libatk-bridge2.0-0 \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+  && apt-get update \
+  && apt-get install -y nodejs \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN echo 'user_allow_other' >> /etc/fuse.conf
+
+WORKDIR /work
+
+COPY go.mod go.sum ./
+RUN /usr/local/go/bin/go mod download
+
+CMD ["bash"]

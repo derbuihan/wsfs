@@ -15,3 +15,19 @@ services:
     volumes:
       - .:/work
     working_dir: /work
+  wsfs-vscode-test:
+    build:
+      context: .
+      dockerfile: Dockerfile.vscode-test
+    privileged: true
+    devices:
+      - /dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    env_file:
+      - .env
+    volumes:
+      - .:/work
+    working_dir: /work

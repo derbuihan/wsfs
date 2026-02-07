@@ -1,0 +1,13 @@
+{
+  "name": "wsfs-vscode-test-host",
+  "private": true,
+  "version": "0.0.1",
+  "publisher": "wsfs",
+  "description": "Minimal extension host for wsfs VSCode integration tests",
+  "main": "./extension.js",
+  "engines": {
+    "vscode": "^1.88.0"
+  },
+  "activationEvents": ["*"],
+  "contributes": {}
+}
