@@ -5,9 +5,16 @@ After=network-online.target
 
 [Service]
 Type=simple
+Environment=WSFS_ALLOW_OTHER=false
+Environment=WSFS_LOG_LEVEL=info
+Environment=WSFS_DEBUG=false
+Environment=WSFS_CACHE=true
+Environment=WSFS_CACHE_DIR=%h/.cache/wsfs
+Environment=WSFS_CACHE_TTL=24h
+Environment=WSFS_CACHE_SIZE_GB=10
 EnvironmentFile=%h/.config/wsfs/%i.env
 ExecStartPre=/usr/bin/mkdir -p ${WSFS_MOUNT}
-ExecStart=/usr/bin/wsfs ${WSFS_OPTS} ${WSFS_MOUNT}
+ExecStart=/usr/bin/wsfs -allow-other=${WSFS_ALLOW_OTHER} -cache=${WSFS_CACHE} -cache-dir=${WSFS_CACHE_DIR} -cache-size=${WSFS_CACHE_SIZE_GB} -cache-ttl=${WSFS_CACHE_TTL} -debug=${WSFS_DEBUG} -log-level=${WSFS_LOG_LEVEL} ${WSFS_MOUNT}
 Restart=on-failure
 TimeoutStopSec=40
 

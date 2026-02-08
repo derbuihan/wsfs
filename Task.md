@@ -4,6 +4,12 @@
 
 ---
 
+## 完了（2026-02-08）
+
+- [x] systemd パッケージングの引数分割（WSFS_OPTS 廃止、env 変数分割、例更新）
+
+---
+
 ## 完了（2026-02-07）
 
 - [x] ファイル監視環境の書き込み競合を解消（truncateのflush遅延、dirty-aware Lookup/Getattr、openCount/dirtyFlags、OnForget保持、テスト）
