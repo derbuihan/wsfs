@@ -81,6 +81,8 @@ type WSFileInfo struct {
 	workspace.ObjectInfo
 	SignedURL        string
 	SignedURLHeaders map[string]string
+	// NotebookSizeComputed tracks whether Size reflects the exported notebook content.
+	NotebookSizeComputed bool
 }
 
 func (info WSFileInfo) Name() string {
@@ -228,6 +230,20 @@ func (c *WorkspaceFilesClient) statInternal(ctx context.Context, filePath string
 		if info == nil {
 			return nil, fs.ErrNotExist
 		}
+		if wsInfo, ok := toWSFileInfo(info); ok && wsInfo.IsNotebook() && !wsInfo.NotebookSizeComputed {
+			exportPath := wsInfo.Path
+			if exportPath == "" {
+				exportPath = filePath
+			}
+			size, err := c.notebookSize(ctx, exportPath)
+			if err == nil {
+				wsInfo.ObjectInfo.Size = size
+				wsInfo.NotebookSizeComputed = true
+				c.cache.Set(filePath, wsInfo)
+				return wsInfo, nil
+			}
+			logging.Debugf("Failed to compute notebook size for %s: %s", filePath, sanitizeError(err))
+		}
 		return info, nil
 	}
 
@@ -247,6 +263,19 @@ func (c *WorkspaceFilesClient) statInternal(ctx context.Context, filePath string
 	if resp.WsfsObjectInfo.SignedURL != nil {
 		apiInfo.SignedURL = resp.WsfsObjectInfo.SignedURL.URL
 		apiInfo.SignedURLHeaders = resp.WsfsObjectInfo.SignedURL.Headers
+	}
+	if apiInfo.IsNotebook() {
+		exportPath := apiInfo.Path
+		if exportPath == "" {
+			exportPath = filePath
+		}
+		size, err := c.notebookSize(ctx, exportPath)
+		if err == nil {
+			apiInfo.ObjectInfo.Size = size
+			apiInfo.NotebookSizeComputed = true
+		} else {
+			logging.Debugf("Failed to compute notebook size for %s: %s", apiInfo.Path, sanitizeError(err))
+		}
 	}
 	c.cache.Set(filePath, apiInfo)
 	return apiInfo, nil
@@ -310,6 +339,25 @@ func (c *WorkspaceFilesClient) readViaSignedURL(ctx context.Context, url string,
 	return io.ReadAll(resp.Body)
 }
 
+func (c *WorkspaceFilesClient) exportNotebook(ctx context.Context, filepath string) ([]byte, error) {
+	resp, err := c.workspaceClient.Export(ctx, workspace.ExportRequest{
+		Path:   filepath,
+		Format: workspace.ExportFormatJupyter,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return base64.StdEncoding.DecodeString(resp.Content)
+}
+
+func (c *WorkspaceFilesClient) notebookSize(ctx context.Context, filepath string) (int64, error) {
+	data, err := c.exportNotebook(ctx, filepath)
+	if err != nil {
+		return 0, err
+	}
+	return int64(len(data)), nil
+}
+
 func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]byte, error) {
 	// Strip .ipynb suffix to get the actual remote path
 	actualPath := pathutil.ToRemotePath(filePath)
@@ -327,15 +375,8 @@ func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]
 
 	// For notebooks, use Export with JUPYTER format
 	if wsInfo.IsNotebook() {
-		resp, err := c.workspaceClient.Export(ctx, workspace.ExportRequest{
-			Path:   actualPath,
-			Format: workspace.ExportFormatJupyter,
-		})
-		if err != nil {
-			return nil, err
-		}
 		logging.Debugf("Read notebook via Export (JUPYTER format) for path: %s", actualPath)
-		return base64.StdEncoding.DecodeString(resp.Content)
+		return c.exportNotebook(ctx, actualPath)
 	}
 
 	// Size-based API selection for regular files

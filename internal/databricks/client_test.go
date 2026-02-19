@@ -1012,6 +1012,11 @@ func TestIsNotebook(t *testing.T) {
 
 // TestStatWithIpynbSuffix verifies that Stat handles .ipynb suffix correctly
 func TestStatWithIpynbSuffix(t *testing.T) {
+	notebookContent := `{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":4}`
+	exportCalled := false
+	exportPath := ""
+	exportFormat := workspace.ExportFormatSource
+
 	mockAPI := &MockAPIClient{
 		DoFunc: func(ctx context.Context, method, path string,
 			headers map[string]string, queryParams map[string]any, request, response any,
@@ -1035,7 +1040,18 @@ func TestStatWithIpynbSuffix(t *testing.T) {
 		},
 	}
 
-	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, nil)
+	mockWorkspace := &MockWorkspaceClient{
+		ExportFunc: func(ctx context.Context, req workspace.ExportRequest) (*workspace.ExportResponse, error) {
+			exportCalled = true
+			exportPath = req.Path
+			exportFormat = req.Format
+			return &workspace.ExportResponse{
+				Content: base64.StdEncoding.EncodeToString([]byte(notebookContent)),
+			}, nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, nil)
 
 	// Test 1: Stat with .ipynb suffix should find the notebook
 	info, err := client.Stat(context.Background(), "/test/notebook.ipynb")
@@ -1049,11 +1065,102 @@ func TestStatWithIpynbSuffix(t *testing.T) {
 	if wsInfo.Path != "/test/notebook" {
 		t.Errorf("Expected path /test/notebook, got %s", wsInfo.Path)
 	}
+	if wsInfo.Size() != int64(len(notebookContent)) {
+		t.Errorf("Expected notebook size %d, got %d", len(notebookContent), wsInfo.Size())
+	}
+	if !wsInfo.NotebookSizeComputed {
+		t.Error("Expected notebook size to be computed")
+	}
+	if !exportCalled {
+		t.Error("Expected Export to be called for notebook size")
+	}
+	if exportFormat != workspace.ExportFormatJupyter {
+		t.Errorf("Expected JUPYTER format, got %v", exportFormat)
+	}
+	if exportPath != "/test/notebook" {
+		t.Errorf("Expected Export path /test/notebook, got %s", exportPath)
+	}
 
 	// Test 2: Stat with .ipynb suffix for non-notebook should fail
 	_, err = client.Stat(context.Background(), "/test/file.ipynb")
 	if err == nil {
 		t.Error("Expected error for .ipynb suffix on non-existent notebook")
+	}
+}
+
+func TestStatNotebookSizeUsesExportWhenCached(t *testing.T) {
+	notebookContent := `{"cells":[{"cell_type":"markdown","source":["hello"]}],"metadata":{},"nbformat":4,"nbformat_minor":4}`
+	exportCalled := false
+	apiCalled := false
+
+	cache := metacache.NewCache(1 * time.Minute)
+	cache.Set("/test/cached_notebook", WSFileInfo{
+		ObjectInfo: workspace.ObjectInfo{
+			Path:       "/test/cached_notebook",
+			ObjectType: workspace.ObjectTypeNotebook,
+			Size:       1,
+			ModifiedAt: time.Now().UnixMilli(),
+		},
+		NotebookSizeComputed: false,
+	})
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			apiCalled = true
+			return fmt.Errorf("unexpected API call: %s", path)
+		},
+	}
+
+	mockWorkspace := &MockWorkspaceClient{
+		ExportFunc: func(ctx context.Context, req workspace.ExportRequest) (*workspace.ExportResponse, error) {
+			exportCalled = true
+			if req.Format != workspace.ExportFormatJupyter {
+				t.Fatalf("expected JUPYTER format, got %v", req.Format)
+			}
+			if req.Path != "/test/cached_notebook" {
+				t.Fatalf("expected export path /test/cached_notebook, got %s", req.Path)
+			}
+			return &workspace.ExportResponse{
+				Content: base64.StdEncoding.EncodeToString([]byte(notebookContent)),
+			}, nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, cache)
+
+	info, err := client.Stat(context.Background(), "/test/cached_notebook")
+	if err != nil {
+		t.Fatalf("Stat failed: %v", err)
+	}
+	wsInfo := info.(WSFileInfo)
+	if wsInfo.Size() != int64(len(notebookContent)) {
+		t.Errorf("Expected notebook size %d, got %d", len(notebookContent), wsInfo.Size())
+	}
+	if !wsInfo.NotebookSizeComputed {
+		t.Error("Expected notebook size to be computed")
+	}
+	if !exportCalled {
+		t.Error("Expected Export to be called for cached notebook size")
+	}
+	if apiCalled {
+		t.Error("Did not expect object-info API call for cached notebook")
+	}
+
+	cached, ok := cache.Get("/test/cached_notebook")
+	if !ok {
+		t.Fatal("Expected cached entry")
+	}
+	cachedInfo, ok := cached.(WSFileInfo)
+	if !ok {
+		t.Fatalf("Expected WSFileInfo in cache, got %T", cached)
+	}
+	if cachedInfo.Size() != int64(len(notebookContent)) {
+		t.Errorf("Expected cached size %d, got %d", len(notebookContent), cachedInfo.Size())
+	}
+	if !cachedInfo.NotebookSizeComputed {
+		t.Error("Expected cached notebook size to be computed")
 	}
 }
 
@@ -1284,8 +1391,8 @@ func TestSanitizeError(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    error
-		contains []string    // strings that should be present
-		excludes []string    // strings that should NOT be present
+		contains []string // strings that should be present
+		excludes []string // strings that should NOT be present
 	}{
 		{
 			name:     "nil error",
