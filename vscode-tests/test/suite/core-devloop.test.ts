@@ -155,6 +155,17 @@ suite('VSCode core dev loop on wsfs', () => {
     await vscode.workspace.fs.delete(obsolete);
     assert.ok(!fs.existsSync(obsolete.fsPath), 'obsolete.txt should be deleted');
 
+    // Non-recursive delete on non-empty directory should surface ENOTEMPTY.
+    const nonEmptyDir = path.join(workspaceRoot, 'nonempty-dir');
+    await fs.promises.mkdir(nonEmptyDir, { recursive: true });
+    await fs.promises.writeFile(path.join(nonEmptyDir, 'test.txt'), 'still-here\n', 'utf8');
+    await assert.rejects(
+      fs.promises.rmdir(nonEmptyDir),
+      (err: unknown) => (err as NodeJS.ErrnoException).code === 'ENOTEMPTY',
+      'rmdir on non-empty directory should return ENOTEMPTY'
+    );
+    await vscode.workspace.fs.delete(vscode.Uri.file(nonEmptyDir), { recursive: true, useTrash: false });
+
     // Recursive directory delete
     const deleteDir = vscode.Uri.file(path.join(workspaceRoot, 'delete-dir'));
     await fs.promises.mkdir(path.join(deleteDir.fsPath, '.vscode'), { recursive: true });

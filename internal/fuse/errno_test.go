@@ -2,6 +2,7 @@ package fuse
 
 import (
 	"context"
+	"fmt"
 	iofs "io/fs"
 	"syscall"
 	"testing"
@@ -48,9 +49,21 @@ func TestErrnoFromBackendError(t *testing.T) {
 			want: syscall.EEXIST,
 		},
 		{
-			name: "directory not empty",
+			name: "directory not empty api error",
 			op:   backendOpDeleteDir,
 			err:  testAPIError(400, "DIRECTORY_NOT_EMPTY", "Folder (/x) is not empty"),
+			want: syscall.ENOTEMPTY,
+		},
+		{
+			name: "directory not empty wrapped api error",
+			op:   backendOpDeleteDir,
+			err:  fmt.Errorf("delete failed: %w", testAPIError(400, "DIRECTORY_NOT_EMPTY", "Folder (/x) is not empty")),
+			want: syscall.ENOTEMPTY,
+		},
+		{
+			name: "directory not empty plain string error",
+			op:   backendOpDeleteDir,
+			err:  fmt.Errorf("DIRECTORY_NOT_EMPTY: Folder (/x) is not empty"),
 			want: syscall.ENOTEMPTY,
 		},
 		{
@@ -68,6 +81,12 @@ func TestErrnoFromBackendError(t *testing.T) {
 		{
 			name: "fallback to eio",
 			op:   backendOpWrite,
+			err:  testAPIError(500, "UNKNOWN", "backend exploded"),
+			want: syscall.EIO,
+		},
+		{
+			name: "delete dir unrelated unknown stays eio",
+			op:   backendOpDeleteDir,
 			err:  testAPIError(500, "UNKNOWN", "backend exploded"),
 			want: syscall.EIO,
 		},

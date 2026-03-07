@@ -32,9 +32,21 @@ func (op backendOp) mapsConflictToExist() bool {
 	}
 }
 
+func isDeleteDirNotEmptyError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "directory_not_empty") || strings.Contains(message, "is not empty")
+}
+
 func errnoFromBackendError(op backendOp, err error) syscall.Errno {
 	if err == nil {
 		return 0
+	}
+	if op == backendOpDeleteDir && isDeleteDirNotEmptyError(err) {
+		return syscall.ENOTEMPTY
 	}
 
 	var errno syscall.Errno
@@ -60,9 +72,6 @@ func errnoFromBackendError(op backendOp, err error) syscall.Errno {
 		}
 
 		message := strings.ToLower(apiError.Message)
-		if op == backendOpDeleteDir && strings.Contains(message, "is not empty") {
-			return syscall.ENOTEMPTY
-		}
 		if (op == backendOpCreate || op == backendOpWrite) &&
 			strings.Contains(message, "parent folder") &&
 			strings.Contains(message, "does not exist") {
