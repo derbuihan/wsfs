@@ -167,7 +167,7 @@ func (n *WSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	entries, err := n.wfClient.ReadDir(opCtx, n.Path())
 	if err != nil {
 		logging.Warnf("Error reading directory %s: %v", n.Path(), err)
-		return nil, syscall.EIO
+		return nil, errnoFromBackendError(backendOpReadDir, err)
 	}
 
 	fuseEntries := make([]fuse.DirEntry, 0, len(entries))
@@ -244,7 +244,7 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	defer cancel()
 	info, err := n.wfClient.Stat(opCtx, childPath)
 	if err != nil {
-		return nil, syscall.ENOENT
+		return nil, errnoFromBackendError(backendOpLookup, err)
 	}
 
 	wsInfo, ok := info.(databricks.WSFileInfo)
@@ -316,7 +316,7 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 	err = n.wfClient.Write(opCtx, childPath, initialContent)
 	if err != nil {
 		logging.Warnf("Error creating file %s: %v", childPath, err)
-		return nil, nil, 0, syscall.EIO
+		return nil, nil, 0, errnoFromBackendError(backendOpCreate, err)
 	}
 
 	info, err := n.wfClient.Stat(opCtx, childPath)
@@ -363,7 +363,7 @@ func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
 
 	info, err := n.wfClient.Stat(opCtx, childPath)
 	if err != nil {
-		return syscall.ENOENT
+		return errnoFromBackendError(backendOpDelete, err)
 	}
 
 	if info.IsDir() {
@@ -373,7 +373,7 @@ func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	err = n.wfClient.Delete(opCtx, childPath, false)
 	if err != nil {
 		logging.Warnf("Error deleting file %s: %v", childPath, err)
-		return syscall.EIO
+		return errnoFromBackendError(backendOpDelete, err)
 	}
 
 	actualPath := childPath
@@ -404,7 +404,7 @@ func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 	err = n.wfClient.Mkdir(opCtx, childPath)
 	if err != nil {
 		logging.Warnf("Error creating directory %s: %v", childPath, err)
-		return nil, syscall.EIO
+		return nil, errnoFromBackendError(backendOpMkdir, err)
 	}
 
 	info, err := n.wfClient.Stat(opCtx, childPath)
@@ -446,7 +446,7 @@ func (n *WSNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 	info, err := n.wfClient.Stat(opCtx, childPath)
 	if err != nil {
-		return syscall.ENOENT
+		return errnoFromBackendError(backendOpDeleteDir, err)
 	}
 	if !info.IsDir() {
 		return syscall.ENOTDIR
@@ -455,7 +455,7 @@ func (n *WSNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	err = n.wfClient.Delete(opCtx, childPath, false)
 	if err != nil {
 		logging.Warnf("Error deleting directory %s: %v", childPath, err)
-		return syscall.EIO
+		return errnoFromBackendError(backendOpDeleteDir, err)
 	}
 
 	return 0
@@ -488,7 +488,7 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 	defer cancel()
 	info, err := n.wfClient.Stat(opCtx, oldPath)
 	if err != nil {
-		return syscall.ENOENT
+		return errnoFromBackendError(backendOpRename, err)
 	}
 
 	wsInfo, ok := info.(databricks.WSFileInfo)
@@ -510,7 +510,7 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 	err = n.wfClient.Rename(opCtx, oldPath, newPath)
 	if err != nil {
 		logging.Warnf("Error renaming %s to %s: %v", oldPath, newPath, err)
-		return syscall.EIO
+		return errnoFromBackendError(backendOpRename, err)
 	}
 
 	actualOldPath := wsInfo.Path

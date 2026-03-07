@@ -35,6 +35,12 @@ if [ ! -d "$MOUNT_POINT" ]; then
   exit 1
 fi
 
+PYTHON_BIN="$(command -v python3 || command -v python || true)"
+if [ -z "$PYTHON_BIN" ]; then
+  echo -e "${RED}Error: python3 or python is required for errno assertions.${NC}"
+  exit 1
+fi
+
 # Setup test directory
 setup_test_dir "$MOUNT_POINT" "fuse_test"
 trap 'cleanup_test_dir "$TEST_BASE_DIR"' EXIT
@@ -268,7 +274,45 @@ assert_exit_code 1 "cat catdir 2>/dev/null" "cat on directory returns error"
 run_cmd 'mkdir nonempty'
 run_cmd 'touch nonempty/file.txt'
 assert_exit_code 1 "rmdir nonempty 2>/dev/null" "rmdir on non-empty directory fails"
+assert_exit_code 0 "$PYTHON_BIN -c 'import errno, os, sys
+try:
+    os.rmdir(\"nonempty\")
+except OSError as e:
+    sys.exit(0 if e.errno == errno.ENOTEMPTY else 1)
+else:
+    sys.exit(1)
+'" "rmdir on non-empty directory returns ENOTEMPTY"
 rm -rf nonempty
+
+# mkdir on existing directory
+run_cmd 'mkdir existsdir'
+assert_exit_code 0 "$PYTHON_BIN -c 'import errno, os, sys
+try:
+    os.mkdir(\"existsdir\")
+except OSError as e:
+    sys.exit(0 if e.errno == errno.EEXIST else 1)
+else:
+    sys.exit(1)
+'" "mkdir on existing directory returns EEXIST"
+run_cmd 'rm -rf existsdir'
+
+# rename missing source
+assert_exit_code 0 "$PYTHON_BIN -c 'import errno, os, sys
+try:
+    os.rename(\"missing_source_12345.txt\", \"rename_target_12345.txt\")
+except OSError as e:
+    sys.exit(0 if e.errno == errno.ENOENT else 1)
+else:
+    sys.exit(1)
+'" "rename missing source returns ENOENT"
+
+# rm -rf tree with hidden and nested files
+run_cmd 'mkdir -p recursive_delete/.vscode recursive_delete/src'
+run_cmd 'printf "{\n}\n" > recursive_delete/.vscode/settings.json'
+run_cmd 'printf "print(1)\n" > recursive_delete/src/hello.py'
+run_cmd 'printf "data\n" > recursive_delete/root.txt'
+run_cmd 'rm -rf recursive_delete'
+assert_not_exists "recursive_delete" "rm -rf deletes directory tree with hidden and nested files"
 
 # ============================================
 # SECTION 7: Editor Compatibility

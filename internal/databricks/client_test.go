@@ -1747,6 +1747,38 @@ func TestRenameNotebookCrossLanguageDeleteFailsLeavesBoth(t *testing.T) {
 	}
 }
 
+func TestRenameNotebookInvalidDestinationReturnsErrInvalid(t *testing.T) {
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fold.py") {
+				return fs.ErrNotExist
+			}
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fold") {
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/old",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				}
+				return nil
+			}
+			return fs.ErrNotExist
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, nil)
+
+	err := client.Rename(context.Background(), "/test/old.py", "/test/new.txt")
+	if !errors.Is(err, fs.ErrInvalid) {
+		t.Fatalf("expected fs.ErrInvalid, got %v", err)
+	}
+}
+
 // TestSanitizeURL verifies URL sanitization removes query parameters
 func TestSanitizeURL(t *testing.T) {
 	tests := []struct {

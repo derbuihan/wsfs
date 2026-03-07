@@ -155,6 +155,16 @@ suite('VSCode core dev loop on wsfs', () => {
     await vscode.workspace.fs.delete(obsolete);
     assert.ok(!fs.existsSync(obsolete.fsPath), 'obsolete.txt should be deleted');
 
+    // Recursive directory delete
+    const deleteDir = vscode.Uri.file(path.join(workspaceRoot, 'delete-dir'));
+    await fs.promises.mkdir(path.join(deleteDir.fsPath, '.vscode'), { recursive: true });
+    await fs.promises.mkdir(path.join(deleteDir.fsPath, 'src'), { recursive: true });
+    await fs.promises.writeFile(path.join(deleteDir.fsPath, '.vscode', 'settings.json'), '{\n}\n', 'utf8');
+    await fs.promises.writeFile(path.join(deleteDir.fsPath, 'src', 'hello.py'), 'print("hello")\n', 'utf8');
+    await fs.promises.writeFile(path.join(deleteDir.fsPath, 'root.txt'), 'delete-me\n', 'utf8');
+    await vscode.workspace.fs.delete(deleteDir, { recursive: true, useTrash: false });
+    assert.ok(!fs.existsSync(deleteDir.fsPath), 'delete-dir should be deleted recursively');
+
     // Python extension command execution
     await removeIfExists(outputExtTxt);
     const extDoc = await vscode.workspace.openTextDocument(helloExtPy);

@@ -2,9 +2,7 @@ package fuse
 
 import (
 	"context"
-	"errors"
 	"io"
-	iofs "io/fs"
 	"os"
 	"syscall"
 	"time"
@@ -63,10 +61,7 @@ func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
 	data, err := n.wfClient.ReadAll(readCtx, remotePath)
 	if err != nil {
 		logging.Debugf("Failed to read file %s: %v", remotePath, err)
-		if errors.Is(err, iofs.ErrNotExist) {
-			return syscall.ENOENT
-		}
-		return syscall.EIO
+		return errnoFromBackendError(backendOpRead, err)
 	}
 
 	// Store in cache and use cache path for on-demand reads
@@ -134,7 +129,7 @@ func (n *WSNode) flushLocked(ctx context.Context) syscall.Errno {
 	err := n.wfClient.Write(opCtx, remotePath, n.buf.Data)
 	if err != nil {
 		logging.Warnf("Error writing back on Flush for %s: %v", remotePath, err)
-		return syscall.EIO
+		return errnoFromBackendError(backendOpWrite, err)
 	}
 	n.clearDirtyLocked()
 

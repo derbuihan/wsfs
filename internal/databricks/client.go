@@ -677,7 +677,8 @@ func resolveNotebookRenameTarget(destinationPath string, currentLanguage workspa
 	if actualPath, ok := pathutil.NotebookRemotePathFromFallbackPath(destinationPath); ok {
 		return notebookRenameTarget{path: actualPath, language: currentLanguage}, nil
 	}
-	return notebookRenameTarget{}, fmt.Errorf("notebook destination must use a supported extension (%s or %s)",
+	return notebookRenameTarget{}, fmt.Errorf("%w: notebook destination must use a supported extension (%s or %s)",
+		fs.ErrInvalid,
 		strings.Join(pathutil.AllNotebookSourceSuffixes(), ", "), pathutil.NotebookFallbackSuffix)
 }
 

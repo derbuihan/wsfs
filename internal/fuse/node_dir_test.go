@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/databricks/databricks-sdk-go/apierr"
 	"github.com/databricks/databricks-sdk-go/service/workspace"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -376,6 +377,25 @@ func TestWSNodeRmdirSuccess(t *testing.T) {
 	}
 }
 
+func TestWSNodeRmdirNotEmpty(t *testing.T) {
+	api := &databricks.FakeWorkspaceAPI{
+		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			return databricks.NewTestFileInfo(filePath, 0, true), nil
+		},
+		DeleteFunc: func(ctx context.Context, filePath string, recursive bool) error {
+			return &apierr.APIError{
+				StatusCode: 400,
+				ErrorCode:  "DIRECTORY_NOT_EMPTY",
+				Message:    "Folder (/dir) is not empty",
+			}
+		},
+	}
+	root := newTestRootNode(t, api)
+	if errno := root.Rmdir(context.Background(), "dir"); errno != syscall.ENOTEMPTY {
+		t.Fatalf("expected ENOTEMPTY, got %d", errno)
+	}
+}
+
 type dummyParent struct{ fs.Inode }
 
 func TestWSNodeRenameInvalidParent(t *testing.T) {
@@ -477,6 +497,38 @@ func TestWSNodeMkdirStatError(t *testing.T) {
 	}
 }
 
+func TestWSNodeCreateMapsMissingParentToENOENT(t *testing.T) {
+	api := &databricks.FakeWorkspaceAPI{
+		WriteFunc: func(ctx context.Context, filepath string, data []byte) error {
+			return &apierr.APIError{
+				StatusCode: 400,
+				ErrorCode:  "UNKNOWN",
+				Message:    "RESOURCE_DOES_NOT_EXIST: The parent folder (/missing) does not exist.",
+			}
+		},
+	}
+	root := newTestRootNode(t, api)
+	out := &fuse.EntryOut{}
+	_, _, _, errno := root.Create(context.Background(), "file.txt", 0, 0644, out)
+	if errno != syscall.ENOENT {
+		t.Fatalf("expected ENOENT, got %d", errno)
+	}
+}
+
+func TestWSNodeCreateMapsPermissionDeniedToEACCES(t *testing.T) {
+	api := &databricks.FakeWorkspaceAPI{
+		WriteFunc: func(ctx context.Context, filepath string, data []byte) error {
+			return apierr.ErrPermissionDenied
+		},
+	}
+	root := newTestRootNode(t, api)
+	out := &fuse.EntryOut{}
+	_, _, _, errno := root.Create(context.Background(), "file.txt", 0, 0644, out)
+	if errno != syscall.EACCES {
+		t.Fatalf("expected EACCES, got %d", errno)
+	}
+}
+
 func TestWSNodeCreateStatError(t *testing.T) {
 	api := &databricks.FakeWorkspaceAPI{
 		WriteFunc: func(ctx context.Context, filepath string, data []byte) error { return nil },
@@ -510,6 +562,26 @@ func TestWSNodeRenameInvalidName(t *testing.T) {
 	dest := newTestRootNode(t, api)
 	if errno := root.Rename(context.Background(), "bad/name", dest, "new", 0); errno != syscall.EINVAL {
 		t.Fatalf("expected EINVAL, got %d", errno)
+	}
+}
+
+func TestWSNodeRenameConflictMapsToEEXIST(t *testing.T) {
+	api := &databricks.FakeWorkspaceAPI{
+		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			return databricks.NewTestFileInfo(filePath, 0, false), nil
+		},
+		RenameFunc: func(ctx context.Context, sourcePath string, destinationPath string) error {
+			return &apierr.APIError{
+				StatusCode: 409,
+				ErrorCode:  "RESOURCE_ALREADY_EXISTS",
+				Message:    "destination already exists",
+			}
+		},
+	}
+	root := newTestRootNode(t, api)
+	dest := newTestRootNode(t, api)
+	if errno := root.Rename(context.Background(), "file.txt", dest, "new.txt", 0); errno != syscall.EEXIST {
+		t.Fatalf("expected EEXIST, got %d", errno)
 	}
 }
 

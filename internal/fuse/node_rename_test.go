@@ -359,8 +359,8 @@ func TestRenameNotebookLanguageChangeFlushFailureStopsRename(t *testing.T) {
 	fileInode := root.NewPersistentInode(ctx, fileNode, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno(fileNode.fileInfo)})
 	root.AddChild("file.py", fileInode, false)
 
-	if errno := root.Rename(ctx, "file.py", root, "file.sql", 0); errno != syscall.EIO {
-		t.Fatalf("expected EIO, got %d", errno)
+	if errno := root.Rename(ctx, "file.py", root, "file.sql", 0); errno != syscall.EACCES {
+		t.Fatalf("expected EACCES, got %d", errno)
 	}
 	if renameCalled {
 		t.Fatal("expected rename to stop before remote rename call")
