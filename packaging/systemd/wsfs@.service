@@ -11,7 +11,7 @@ Environment=WSFS_DEBUG=false
 Environment=WSFS_REMOTE_PATH=
 EnvironmentFile=%h/.config/wsfs/%i.env
 ExecStartPre=/usr/bin/mkdir -p ${WSFS_MOUNT}
-ExecStart=/usr/bin/wsfs -allow-other=${WSFS_ALLOW_OTHER} -debug=${WSFS_DEBUG} -log-level=${WSFS_LOG_LEVEL} ${WSFS_REMOTE_PATH:+-remote-path=${WSFS_REMOTE_PATH}} ${WSFS_MOUNT}
+ExecStart=/usr/bin/wsfs -allow-other=${WSFS_ALLOW_OTHER} -debug=${WSFS_DEBUG} -log-level=${WSFS_LOG_LEVEL} -remote-path=${WSFS_REMOTE_PATH} ${WSFS_MOUNT}
 Restart=on-failure
 TimeoutStopSec=40
 
