@@ -59,8 +59,9 @@ Debugging failing shell tests (Docker):
 docker compose run --rm wsfs-test bash -c '
   set -e
   go build -o /tmp/wsfs ./cmd/wsfs
-  mkdir -p /mnt/wsfs /tmp/wsfs-cache
-  /tmp/wsfs --debug --cache=true --cache-dir=/tmp/wsfs-cache --cache-ttl=24h /mnt/wsfs > /tmp/wsfs.log 2>&1 &
+  export XDG_CACHE_HOME=/tmp/xdg-cache
+  mkdir -p /mnt/wsfs "$XDG_CACHE_HOME/wsfs"
+  /tmp/wsfs --debug /mnt/wsfs > /tmp/wsfs.log 2>&1 &
   WSFS_PID=$!
   for i in $(seq 1 30); do
     if grep -q " /mnt/wsfs " /proc/mounts 2>/dev/null; then break; fi

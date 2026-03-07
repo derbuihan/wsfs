@@ -15,7 +15,6 @@ go build -o wsfs ./cmd/wsfs
 
 # Run (requires DATABRICKS_HOST and DATABRICKS_TOKEN env vars)
 ./wsfs /mnt/wsfs
-./wsfs --cache=true --cache-dir=/tmp/wsfs-cache /mnt/wsfs
 ./wsfs --debug /mnt/wsfs
 
 # Unmount
@@ -103,7 +102,7 @@ go test ./...                    # Unit tests
 1. Add method to appropriate package
 2. Implement fallback strategy if calling external APIs
 3. Add unit test in `*_test.go`
-4. Test with both `--cache=true` and `--cache=false`
+4. Verify the zero-config cache path still works in unit and integration tests
 
 ## Known Limitations
 

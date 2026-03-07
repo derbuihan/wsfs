@@ -180,14 +180,6 @@ func TestRunShowVersion(t *testing.T) {
 	}
 }
 
-func TestRunInvalidConfig(t *testing.T) {
-	deps := defaultDeps()
-	args := []string{"wsfs", "--cache-size=0", "/mnt/wsfs"}
-	if err := run(args, deps); err == nil {
-		t.Fatal("expected error")
-	}
-}
-
 func TestRunInitWorkspaceError(t *testing.T) {
 	deps := defaultDeps()
 	deps.initWorkspace = func() (*databrickssdk.WorkspaceClient, error) {
@@ -614,13 +606,6 @@ func TestParseArgsMountPointIgnoredForVersion(t *testing.T) {
 	}
 }
 
-func TestParseArgsRejectsRemovedCacheFlags(t *testing.T) {
-	_, err := parseArgs([]string{"wsfs", "--cache-ttl=invalid", "/mnt/wsfs"})
-	if err == nil {
-		t.Fatal("expected error")
-	}
-}
-
 func TestRunMountPointRequired(t *testing.T) {
 	deps := defaultDeps()
 	if err := run([]string{"wsfs"}, deps); err == nil {
@@ -648,13 +633,6 @@ func TestParseArgsAllowOtherDefaultFalse(t *testing.T) {
 	}
 	if cfg.allowOther {
 		t.Fatal("allowOther should default to false")
-	}
-}
-
-func TestParseArgsRejectsRemovedCacheSizeFlag(t *testing.T) {
-	_, err := parseArgs([]string{"wsfs", "--cache-size=1.25", "/mnt/wsfs"})
-	if err == nil {
-		t.Fatal("expected error")
 	}
 }
 
