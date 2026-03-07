@@ -636,6 +636,106 @@ func TestParseArgsAllowOtherDefaultFalse(t *testing.T) {
 	}
 }
 
+func TestParseArgsRemotePath(t *testing.T) {
+	cfg, err := parseArgs([]string{"wsfs", "--remote-path=/Users/alice", "/mnt/wsfs"})
+	if err != nil {
+		t.Fatalf("parseArgs failed: %v", err)
+	}
+	if cfg.remotePath != "/Users/alice" {
+		t.Fatalf("remotePath = %q, want /Users/alice", cfg.remotePath)
+	}
+}
+
+func TestParseArgsRemotePathDefault(t *testing.T) {
+	cfg, err := parseArgs([]string{"wsfs", "/mnt/wsfs"})
+	if err != nil {
+		t.Fatalf("parseArgs failed: %v", err)
+	}
+	if cfg.remotePath != "" {
+		t.Fatalf("remotePath should default to empty, got %q", cfg.remotePath)
+	}
+}
+
+func TestRunPassesRemotePathToRootNode(t *testing.T) {
+	deps := defaultDeps()
+	deps.initWorkspace = func() (*databrickssdk.WorkspaceClient, error) {
+		return &databrickssdk.WorkspaceClient{}, nil
+	}
+	deps.workspaceMe = func(ctx context.Context, w *databrickssdk.WorkspaceClient) (string, error) {
+		return "Tester", nil
+	}
+	deps.currentUser = func() (*user.User, error) {
+		return &user.User{Uid: "123"}, nil
+	}
+	deps.newDiskCache = func() (*filecache.DiskCache, error) {
+		return filecache.NewDisabledCache(), nil
+	}
+	deps.newWorkspaceFilesClient = func(*databrickssdk.WorkspaceClient) (databricks.WorkspaceFilesAPI, error) {
+		return &fakeWorkspaceFilesClient{}, nil
+	}
+
+	var gotRootPath string
+	deps.newRootNode = func(api databricks.WorkspaceFilesAPI, cache *filecache.DiskCache, rootPath string, registry *wsfsfuse.DirtyNodeRegistry, config *wsfsfuse.NodeConfig) (*wsfsfuse.WSNode, error) {
+		gotRootPath = rootPath
+		return &wsfsfuse.WSNode{}, nil
+	}
+	deps.mount = func(mountPoint string, root fs.InodeEmbedder, opts *fs.Options) (mountServer, error) {
+		return &fakeServer{waitCh: make(chan struct{})}, nil
+	}
+	deps.signalContext = func() (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx, func() {}
+	}
+
+	if err := run([]string{"wsfs", "--remote-path=/Users/alice", "/mnt/wsfs"}, deps); err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if gotRootPath != "/Users/alice" {
+		t.Fatalf("rootPath = %q, want /Users/alice", gotRootPath)
+	}
+}
+
+func TestRunDefaultsRemotePathToSlash(t *testing.T) {
+	deps := defaultDeps()
+	deps.initWorkspace = func() (*databrickssdk.WorkspaceClient, error) {
+		return &databrickssdk.WorkspaceClient{}, nil
+	}
+	deps.workspaceMe = func(ctx context.Context, w *databrickssdk.WorkspaceClient) (string, error) {
+		return "Tester", nil
+	}
+	deps.currentUser = func() (*user.User, error) {
+		return &user.User{Uid: "123"}, nil
+	}
+	deps.newDiskCache = func() (*filecache.DiskCache, error) {
+		return filecache.NewDisabledCache(), nil
+	}
+	deps.newWorkspaceFilesClient = func(*databrickssdk.WorkspaceClient) (databricks.WorkspaceFilesAPI, error) {
+		return &fakeWorkspaceFilesClient{}, nil
+	}
+
+	var gotRootPath string
+	deps.newRootNode = func(api databricks.WorkspaceFilesAPI, cache *filecache.DiskCache, rootPath string, registry *wsfsfuse.DirtyNodeRegistry, config *wsfsfuse.NodeConfig) (*wsfsfuse.WSNode, error) {
+		gotRootPath = rootPath
+		return &wsfsfuse.WSNode{}, nil
+	}
+	deps.mount = func(mountPoint string, root fs.InodeEmbedder, opts *fs.Options) (mountServer, error) {
+		return &fakeServer{waitCh: make(chan struct{})}, nil
+	}
+	deps.signalContext = func() (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx, func() {}
+	}
+
+	if err := run([]string{"wsfs", "/mnt/wsfs"}, deps); err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if gotRootPath != "/" {
+		t.Fatalf("rootPath = %q, want /", gotRootPath)
+	}
+}
+
 func TestRunSignalContextCancel(t *testing.T) {
 	deps := defaultDeps()
 	deps.initWorkspace = func() (*databrickssdk.WorkspaceClient, error) {

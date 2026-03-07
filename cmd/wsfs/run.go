@@ -33,6 +33,7 @@ type cliConfig struct {
 	debug       bool
 	logLevel    string
 	allowOther  bool
+	remotePath  string
 	mountPoint  string
 }
 
@@ -105,6 +106,7 @@ func parseArgs(args []string) (cliConfig, error) {
 	debug := fs.Bool("debug", false, "print debug data (equivalent to --log-level=debug)")
 	logLevel := fs.String("log-level", "info", "log level: debug, info, warn, error")
 	allowOther := fs.Bool("allow-other", false, "allow other users to access the mount")
+	remotePath := fs.String("remote-path", "", "Databricks workspace path to mount (default: /)")
 
 	if err := fs.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -118,6 +120,7 @@ func parseArgs(args []string) (cliConfig, error) {
 		debug:       *debug,
 		logLevel:    *logLevel,
 		allowOther:  *allowOther,
+		remotePath:  *remotePath,
 	}
 
 	if fs.NArg() > 0 {
@@ -235,7 +238,11 @@ func run(args []string, deps runDeps) error {
 	}
 
 	// Set up Root node
-	root, err := deps.newRootNode(wfclient, diskCache, "/", registry, nodeConfig)
+	rootPath := cfg.remotePath
+	if rootPath == "" {
+		rootPath = "/"
+	}
+	root, err := deps.newRootNode(wfclient, diskCache, rootPath, registry, nodeConfig)
 	if err != nil {
 		return fmt.Errorf("Failed to create root node: %w", err)
 	}
