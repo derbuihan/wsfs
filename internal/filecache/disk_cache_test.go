@@ -39,11 +39,11 @@ func TestNewDiskCacheDefaults(t *testing.T) {
 		t.Fatalf("NewDiskCache failed: %v", err)
 	}
 
-	if cache.maxSizeBytes != 10*1024*1024*1024 {
-		t.Errorf("Expected default maxSizeBytes 10GB, got %d", cache.maxSizeBytes)
+	if cache.maxSizeBytes != DefaultMaxSizeBytes {
+		t.Errorf("Expected default maxSizeBytes %d, got %d", DefaultMaxSizeBytes, cache.maxSizeBytes)
 	}
-	if cache.ttl != 24*time.Hour {
-		t.Errorf("Expected default ttl 24h, got %v", cache.ttl)
+	if cache.ttl != DefaultTTL {
+		t.Errorf("Expected default ttl %v, got %v", DefaultTTL, cache.ttl)
 	}
 }
 

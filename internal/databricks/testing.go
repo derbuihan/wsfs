@@ -86,6 +86,10 @@ func (f *FakeWorkspaceAPI) CacheInvalidate(filePath string) {
 	}
 }
 
+func (f *FakeWorkspaceAPI) MetadataTTL() time.Duration {
+	return time.Second
+}
+
 // MockWorkspaceClient is a mock for the workspaceClient interface (thin wrapper)
 // This only implements the methods we actually use: Export, Delete, Mkdirs, Import
 type MockWorkspaceClient struct {

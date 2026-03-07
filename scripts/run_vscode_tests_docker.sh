@@ -49,11 +49,14 @@ docker compose run --rm wsfs-vscode-test bash -c "
   go build -buildvcs=false -o /tmp/wsfs ./cmd/wsfs
 
   # Set up directories
-  mkdir -p /mnt/wsfs /tmp/wsfs-cache
+  export XDG_CACHE_HOME=/tmp/xdg-cache
+  CACHE_DIR=\"\${XDG_CACHE_HOME}/wsfs\"
+  mkdir -p /mnt/wsfs \"\$CACHE_DIR\"
 
   # Mount wsfs
   echo 'Mounting wsfs...'
-  /tmp/wsfs --debug --cache=true --cache-dir=/tmp/wsfs-cache --cache-ttl=24h /mnt/wsfs > /tmp/wsfs.log 2>&1 &
+  echo \"Using cache directory: \$CACHE_DIR\"
+  /tmp/wsfs --debug /mnt/wsfs > /tmp/wsfs.log 2>&1 &
   WSFS_PID=\$!
 
   # Wait for mount

@@ -2,14 +2,68 @@ package fuse
 
 import (
 	"context"
+	"errors"
+	iofs "io/fs"
 	"syscall"
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
+	"wsfs/internal/databricks"
 	"wsfs/internal/logging"
 )
+
+func (n *WSNode) refreshMetadataIfNeededLocked(ctx context.Context) syscall.Errno {
+	if n.isDirtyLocked() {
+		return 0
+	}
+	if n.wfClient == nil {
+		if n.metadataCheckedAt.IsZero() {
+			n.metadataCheckedAt = time.Now()
+		}
+		return 0
+	}
+
+	ttl := n.wfClient.MetadataTTL()
+	if ttl <= 0 {
+		ttl = time.Second
+	}
+	if n.metadataCheckedAt.IsZero() {
+		n.metadataCheckedAt = time.Now()
+		return 0
+	}
+	if !n.metadataCheckedAt.IsZero() && time.Since(n.metadataCheckedAt) < ttl {
+		return 0
+	}
+
+	info, err := n.wfClient.Stat(ctx, n.Path())
+	if err != nil {
+		if errors.Is(err, iofs.ErrNotExist) {
+			return syscall.ENOENT
+		}
+		return errnoFromBackendError(backendOpLookup, err)
+	}
+
+	wsInfo, ok := info.(databricks.WSFileInfo)
+	if !ok {
+		logging.Debugf("refreshMetadata: unexpected file info type for %s", n.Path())
+		return syscall.EIO
+	}
+
+	if wsInfo.ModTime().After(n.fileInfo.ModTime()) {
+		n.clearCleanBufferLocked()
+		if n.diskCache != nil && !n.diskCache.IsDisabled() {
+			if err := n.diskCache.Delete(n.fileInfo.Path); err != nil {
+				logging.Debugf("refreshMetadata: failed to delete cache for %s: %v", n.fileInfo.Path, err)
+			}
+		}
+	}
+
+	n.fileInfo = wsInfo
+	n.metadataCheckedAt = time.Now()
+	return 0
+}
 
 func (n *WSNode) fillAttr(ctx context.Context, out *fuse.Attr) {
 	wsInfo := n.fileInfo
@@ -47,6 +101,10 @@ func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 	defer n.mu.Unlock()
 
 	logging.Debugf("Getattr called on path: %s", n.Path())
+
+	if errno := n.refreshMetadataIfNeededLocked(ctx); errno != 0 {
+		return errno
+	}
 
 	n.fillAttr(ctx, &out.Attr)
 
@@ -148,6 +206,7 @@ func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttr
 
 	if mtime != nil {
 		n.markModifiedLocked(*mtime)
+		n.metadataCheckedAt = time.Now()
 	}
 
 	if sizeChanged {

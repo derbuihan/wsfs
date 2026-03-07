@@ -31,6 +31,7 @@
 - [x] Notebook を source 表示に変更（言語別拡張子、SOURCE import/export、衝突時 `.ipynb` フォールバック、rename/テスト更新）
 - [x] Notebook rename 安全性修正（dirty/open rename の pre-flush、言語変更 rename 後の inode/cache refresh、rename テスト補強）
 - [x] errno 正規化で VSCode 互換を改善（ENOTEMPTY/EEXIST/ENOENT/EACCES/EINVAL のマッピング、recursive delete テスト補強）
+- [x] zero-config cache へ移行（CLI の `--cache*` 廃止、always-on metadata/dir cache、default disk cache、singleflight、Open の lazy read、cache テスト更新）
 
 ---
 

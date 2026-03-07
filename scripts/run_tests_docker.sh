@@ -14,7 +14,6 @@
 #   ./run_tests_docker.sh                    # Run all tests
 #   ./run_tests_docker.sh --fuse-only        # Run only FUSE tests
 #   ./run_tests_docker.sh --security-only    # Run only security tests
-#   ./run_tests_docker.sh --config-only      # Run only config tests
 #   ./run_tests_docker.sh --build            # Rebuild and run all tests
 #
 # Requirements:
@@ -32,7 +31,6 @@ cd "$ROOT_DIR"
 DO_BUILD=false
 EXTRA_OPTS=""
 RUN_SECURITY=true
-RUN_CONFIG=true
 RUN_MAIN=true
 
 while [[ $# -gt 0 ]]; do
@@ -43,13 +41,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --security-only)
       RUN_MAIN=false
-      RUN_CONFIG=false
-      EXTRA_OPTS="${EXTRA_OPTS} $1"
-      shift
-      ;;
-    --config-only)
-      RUN_MAIN=false
-      RUN_SECURITY=false
       EXTRA_OPTS="${EXTRA_OPTS} $1"
       shift
       ;;
@@ -58,15 +49,9 @@ while [[ $# -gt 0 ]]; do
       EXTRA_OPTS="${EXTRA_OPTS} $1"
       shift
       ;;
-    --skip-config)
-      RUN_CONFIG=false
-      EXTRA_OPTS="${EXTRA_OPTS} $1"
-      shift
-      ;;
     --fuse-only|--cache-only|--stress-only)
       RUN_MAIN=true
       RUN_SECURITY=false
-      RUN_CONFIG=false
       EXTRA_OPTS="${EXTRA_OPTS} $1"
       shift
       ;;
@@ -101,7 +86,6 @@ echo "Databricks Host: ${DATABRICKS_HOST}"
 echo "Extra options: ${EXTRA_OPTS:-<none>}"
 echo "Run main tests: ${RUN_MAIN}"
 echo "Run security tests: ${RUN_SECURITY}"
-echo "Run config tests: ${RUN_CONFIG}"
 echo ""
 
 # Build if requested
@@ -130,11 +114,14 @@ if [ "$RUN_MAIN" = true ]; then
     go build -buildvcs=false -o /tmp/wsfs ./cmd/wsfs
 
     # Set up directories
-    mkdir -p /mnt/wsfs /tmp/wsfs-cache
+    export XDG_CACHE_HOME=/tmp/xdg-cache
+    CACHE_DIR=\"\${XDG_CACHE_HOME}/wsfs\"
+    mkdir -p /mnt/wsfs \"\$CACHE_DIR\"
 
-    # Mount with cache enabled
+    # Mount wsfs with zero-config cache defaults
     echo 'Mounting wsfs...'
-    /tmp/wsfs --debug --cache=true --cache-dir=/tmp/wsfs-cache --cache-ttl=24h /mnt/wsfs > /tmp/wsfs.log 2>&1 &
+    echo "Using cache directory: \$CACHE_DIR"
+    /tmp/wsfs --debug /mnt/wsfs > /tmp/wsfs.log 2>&1 &
     WSFS_PID=\$!
 
     # Wait for mount
@@ -154,8 +141,8 @@ if [ "$RUN_MAIN" = true ]; then
     echo 'wsfs mounted successfully'
     echo ''
 
-    # Run tests via run_tests.sh (skip security and config - they run separately)
-    ./scripts/run_tests.sh /mnt/wsfs --cache-dir=/tmp/wsfs-cache --log-file=/tmp/wsfs.log --skip-security --skip-config ${EXTRA_OPTS}
+    # Run main tests; security runs in a separate stage
+    ./scripts/run_tests.sh /mnt/wsfs --log-file=/tmp/wsfs.log --skip-security ${EXTRA_OPTS}
     TEST_RESULT=\$?
 
     # Cleanup
@@ -184,11 +171,14 @@ if [ "$RUN_SECURITY" = true ]; then
     fi
 
     # Set up directories
-    mkdir -p /mnt/wsfs /tmp/wsfs-cache
+    export XDG_CACHE_HOME=/tmp/xdg-cache
+    CACHE_DIR=\"\${XDG_CACHE_HOME}/wsfs\"
+    mkdir -p /mnt/wsfs \"\$CACHE_DIR\"
 
     # Mount with --allow-other for security tests
     echo 'Mounting wsfs with --allow-other...'
-    /tmp/wsfs --debug --allow-other --cache=true --cache-dir=/tmp/wsfs-cache /mnt/wsfs > /tmp/wsfs.log 2>&1 &
+    echo "Using cache directory: \$CACHE_DIR"
+    /tmp/wsfs --debug --allow-other /mnt/wsfs > /tmp/wsfs.log 2>&1 &
     WSFS_PID=\$!
 
     # Wait for mount
@@ -219,26 +209,6 @@ if [ "$RUN_SECURITY" = true ]; then
     kill \$WSFS_PID 2>/dev/null || true
 
     exit \$TEST_RESULT
-  " || OVERALL_RESULT=1
-fi
-
-# Stage 3: Run cache configuration tests (requires mount/unmount)
-if [ "$RUN_CONFIG" = true ]; then
-  echo ""
-  echo "========================================"
-  echo "Stage 3: Cache Configuration Tests"
-  echo "========================================"
-
-  $DOCKER_RUN wsfs-test bash -c "
-    set -e
-
-    # Build wsfs (if not already built)
-    if [ ! -x /tmp/wsfs ]; then
-      go build -buildvcs=false -o /tmp/wsfs ./cmd/wsfs
-    fi
-
-    # Run cache configuration tests
-    ./scripts/run_tests.sh /mnt/wsfs --config-only --wsfs-binary=/tmp/wsfs --cache-dir=/tmp/wsfs-cache
   " || OVERALL_RESULT=1
 fi
 

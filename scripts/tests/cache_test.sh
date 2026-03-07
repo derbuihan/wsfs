@@ -1,28 +1,40 @@
 #!/bin/bash
 
 # Unified Cache Test Script
-# Tests disk cache functionality on a mounted wsfs filesystem
+# Tests the default always-on cache behavior on a mounted wsfs filesystem
 #
 # Usage: ./cache_test.sh /path/to/mountpoint [cache_dir] [log_file]
-#
-# This script requires wsfs to be mounted with cache enabled:
-#   wsfs --cache=true --cache-dir=/tmp/wsfs-cache /mnt/wsfs
+# If cache_dir is omitted, the script derives XDG_CACHE_HOME/wsfs or ~/.cache/wsfs.
 #
 # Sections:
 #   1. Basic Cache Operations (hit/miss)
 #   2. Cache Invalidation (write/delete/rename)
 #   3. Remote Synchronization
-#   4. TTL/LRU Eviction
-#   5. Cache Configuration Tests
+#   4. Cache Reuse
+#   5. Concurrent Access and Directory Invalidations
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/test_helpers.sh"
 
+resolve_cache_dir() {
+  if [ -n "${XDG_CACHE_HOME:-}" ]; then
+    echo "${XDG_CACHE_HOME}/wsfs"
+    return
+  fi
+
+  if [ -n "${HOME:-}" ]; then
+    echo "${HOME}/.cache/wsfs"
+    return
+  fi
+
+  echo "/tmp/wsfs-cache"
+}
+
 # Parse arguments
 MOUNT_POINT="${1:-}"
-CACHE_DIR="${2:-/tmp/wsfs-cache}"
+CACHE_DIR="${2:-$(resolve_cache_dir)}"
 LOG_FILE="${3:-/tmp/wsfs-test.log}"
 
 if [ -z "$MOUNT_POINT" ]; then
@@ -52,7 +64,7 @@ echo ""
 # Check if cache directory exists
 if [ ! -d "$CACHE_DIR" ]; then
   echo -e "${YELLOW}Warning: Cache directory ${CACHE_DIR} does not exist${NC}"
-  echo "Cache may be disabled or using a different directory"
+  echo "wsfs may be using a different cache root or the disk cache may still be cold"
 fi
 
 # Clear log file for fresh start
@@ -81,7 +93,7 @@ if [ "$CACHE_COUNT" -gt 0 ]; then
   echo -e "${GREEN}✓ PASS:${NC} Cache directory has entries after first read ($CACHE_COUNT entries)"
   ((TEST_PASSED++)) || true
 else
-  echo -e "${YELLOW}⊘ INFO:${NC} No cache entries found (cache may be disabled)"
+  echo -e "${YELLOW}⊘ INFO:${NC} No cache entries found yet (entry may still be in memory or using a different cache root)"
 fi
 
 # Sync to ensure data is written
@@ -200,7 +212,7 @@ if [ -n "${DATABRICKS_HOST:-}" ] && [ -n "${DATABRICKS_TOKEN:-}" ]; then
       echo -e "${GREEN}✓ PASS:${NC} Cache correctly detected remote modification"
       ((TEST_PASSED++)) || true
     elif [ "$UPDATED" = "original content" ]; then
-      echo -e "${YELLOW}⊘ INFO:${NC} Cache did not detect remote modification (may depend on TTL)"
+      echo -e "${YELLOW}⊘ INFO:${NC} Cache did not detect remote modification yet (may still be within the metadata TTL window)"
     else
       echo -e "${YELLOW}⊘ INFO:${NC} Unexpected content: '$UPDATED'"
     fi
@@ -212,9 +224,9 @@ else
 fi
 
 # ============================================
-# SECTION 4: TTL/LRU Behavior
+# SECTION 4: Cache Reuse
 # ============================================
-print_section "Section 4: TTL/LRU Behavior"
+print_section "Section 4: Cache Reuse"
 
 # Create multiple files to populate cache
 echo "Creating multiple files..."
@@ -232,7 +244,7 @@ if [ "$CACHE_COUNT" -ge 5 ]; then
   echo -e "${GREEN}✓ PASS:${NC} Cache has at least 5 entries"
   ((TEST_PASSED++)) || true
 else
-  echo -e "${YELLOW}⊘ INFO:${NC} Cache has $CACHE_COUNT entries (may be evicted or disabled)"
+  echo -e "${YELLOW}⊘ INFO:${NC} Cache has $CACHE_COUNT entries (entries may have been evicted or are still buffered in memory)"
 fi
 
 # Read all files again to verify cache works
@@ -253,9 +265,9 @@ HASH2=$(md5sum cache_large.bin 2>/dev/null | cut -d' ' -f1 || md5 -q cache_large
 assert_eq "$HASH1" "$HASH2" "Large file hash matches on second read"
 
 # ============================================
-# SECTION 5: Cache Configuration Tests
+# SECTION 5: Concurrent Access and Directory Invalidations
 # ============================================
-print_section "Section 5: Cache Configuration Tests"
+print_section "Section 5: Concurrent Access and Directory Invalidations"
 
 # Concurrent file access
 echo "Testing concurrent file access..."

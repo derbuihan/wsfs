@@ -890,7 +890,7 @@ func TestWSNodeOnForgetDirty(t *testing.T) {
 // Remote Modification Detection Tests
 // ============================================================================
 
-// TestOpenDetectsRemoteModification verifies that Open() invalidates cache when remote file is modified
+// TestOpenDetectsRemoteModification verifies that Open() drops clean cached data when remote metadata changes.
 func TestOpenDetectsRemoteModification(t *testing.T) {
 	originalTime := time.Now().Add(-1 * time.Hour)
 	newTime := time.Now()
@@ -922,23 +922,35 @@ func TestOpenDetectsRemoteModification(t *testing.T) {
 			Size:       int64(len(originalData)),
 			ModifiedAt: originalTime.UnixMilli(),
 		}},
-		buf: fileBuffer{Data: originalData, Dirty: false},
+		buf:               fileBuffer{Data: originalData, Dirty: false},
+		metadataCheckedAt: time.Now().Add(-2 * time.Second),
 	}
 
-	// Open should detect remote modification and invalidate cache
 	_, _, errno := n.Open(context.Background(), 0)
 	if errno != 0 {
 		t.Fatalf("Open failed with errno: %d", errno)
 	}
 
-	// After Open, the buffer should have new data (fetched via ReadAll)
-	if string(n.buf.Data) != string(newData) {
-		t.Errorf("Expected buffer to have new data %q, got %q", string(newData), string(n.buf.Data))
+	if n.buf.Data != nil {
+		t.Fatal("expected clean in-memory buffer to be dropped on metadata refresh")
+	}
+	if n.fileInfo.ModTime().UnixMilli() != newTime.UnixMilli() {
+		t.Fatalf("expected modtime to be refreshed")
+	}
+	if readAllCallCount != 0 {
+		t.Fatalf("expected Open to defer content fetch, got %d ReadAll calls", readAllCallCount)
 	}
 
-	// ReadAll should have been called once to fetch new data after cache invalidation
+	result, errno := n.Read(context.Background(), nil, make([]byte, len(newData)), 0)
+	if errno != 0 {
+		t.Fatalf("Read failed: %d", errno)
+	}
+	data, _ := result.Bytes(nil)
+	if string(data) != string(newData) {
+		t.Fatalf("expected refreshed data %q, got %q", string(newData), string(data))
+	}
 	if readAllCallCount != 1 {
-		t.Errorf("Expected ReadAll to be called once after cache invalidation, got %d", readAllCallCount)
+		t.Fatalf("expected one deferred ReadAll call, got %d", readAllCallCount)
 	}
 }
 
@@ -970,7 +982,8 @@ func TestOpenPreservesDirtyBuffer(t *testing.T) {
 			Size:       int64(len(localData)),
 			ModifiedAt: originalTime.UnixMilli(),
 		}},
-		buf: fileBuffer{Data: localData, Dirty: true}, // Buffer is dirty
+		buf:               fileBuffer{Data: localData, Dirty: true}, // Buffer is dirty
+		metadataCheckedAt: time.Now().Add(-2 * time.Second),
 	}
 
 	_, _, errno := n.Open(context.Background(), 0)
@@ -1018,7 +1031,8 @@ func TestOpenNoChangeWhenRemoteNotModified(t *testing.T) {
 			Size:       int64(len(originalData)),
 			ModifiedAt: sameTime.UnixMilli(),
 		}},
-		buf: fileBuffer{Data: originalData, Dirty: false},
+		buf:               fileBuffer{Data: originalData, Dirty: false},
+		metadataCheckedAt: time.Now().Add(-2 * time.Second),
 	}
 
 	_, _, errno := n.Open(context.Background(), 0)
@@ -1034,6 +1048,45 @@ func TestOpenNoChangeWhenRemoteNotModified(t *testing.T) {
 	// ReadAll should not be called since remote is unchanged
 	if readAllCalled {
 		t.Error("Expected ReadAll not to be called when remote is unchanged")
+	}
+}
+
+func TestOpenReadOnlyDefersRemoteRead(t *testing.T) {
+	readAllCalls := 0
+	api := &databricks.FakeWorkspaceAPI{
+		ReadAllFunc: func(ctx context.Context, filePath string) ([]byte, error) {
+			readAllCalls++
+			return []byte("hello"), nil
+		},
+	}
+
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+			Size:       5,
+		}},
+		metadataCheckedAt: time.Now(),
+	}
+
+	if _, _, errno := n.Open(context.Background(), 0); errno != 0 {
+		t.Fatalf("Open failed: %d", errno)
+	}
+	if readAllCalls != 0 {
+		t.Fatalf("expected no eager reads on Open, got %d", readAllCalls)
+	}
+
+	result, errno := n.Read(context.Background(), nil, make([]byte, 5), 0)
+	if errno != 0 {
+		t.Fatalf("Read failed: %d", errno)
+	}
+	data, _ := result.Bytes(nil)
+	if string(data) != "hello" {
+		t.Fatalf("unexpected data: %q", string(data))
+	}
+	if readAllCalls != 1 {
+		t.Fatalf("expected one deferred read, got %d", readAllCalls)
 	}
 }
 

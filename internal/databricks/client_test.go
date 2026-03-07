@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -327,6 +328,83 @@ func TestReadSmallFilesUseExport(t *testing.T) {
 	}
 }
 
+func TestReadAllSingleflight(t *testing.T) {
+	testContent := []byte("singleflight")
+	contentB64 := base64.StdEncoding.EncodeToString(testContent)
+	var (
+		mu          sync.Mutex
+		objectCalls int
+		exportCalls int
+	)
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if !strings.Contains(path, "object-info") {
+				return fmt.Errorf("unexpected path: %s", path)
+			}
+			time.Sleep(25 * time.Millisecond)
+			mu.Lock()
+			objectCalls++
+			mu.Unlock()
+			resp := response.(*objectInfoResponse)
+			resp.WsfsObjectInfo = wsfsObjectInfo{
+				ObjectInfo: workspace.ObjectInfo{
+					Path:       "/test.txt",
+					ObjectType: workspace.ObjectTypeFile,
+					Size:       int64(len(testContent)),
+					ModifiedAt: time.Now().UnixMilli(),
+				},
+			}
+			return nil
+		},
+	}
+
+	mockWorkspace := &MockWorkspaceClient{
+		ExportFunc: func(ctx context.Context, request workspace.ExportRequest) (*workspace.ExportResponse, error) {
+			time.Sleep(25 * time.Millisecond)
+			mu.Lock()
+			exportCalls++
+			mu.Unlock()
+			return &workspace.ExportResponse{Content: contentB64}, nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, metacache.NewCacheWithTTLs(10*time.Second, 3*time.Second))
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			data, err := client.ReadAll(context.Background(), "/test.txt")
+			if err == nil && string(data) != string(testContent) {
+				err = fmt.Errorf("unexpected data: %q", string(data))
+			}
+			errCh <- err
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("ReadAll failed: %v", err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if objectCalls != 1 {
+		t.Fatalf("expected 1 object-info call, got %d", objectCalls)
+	}
+	if exportCalls != 1 {
+		t.Fatalf("expected 1 export call, got %d", exportCalls)
+	}
+}
+
 // TestWriteViaNewFiles verifies that Write uses new-files API for large files (>= 5MB)
 func TestWriteViaNewFiles(t *testing.T) {
 	// Create a large file (>= 5MB threshold)
@@ -530,6 +608,178 @@ func TestReadDir(t *testing.T) {
 	}
 	if !entries[2].IsDir() {
 		t.Error("Subdirectory should be a directory")
+	}
+}
+
+func TestReadDirCachesEntriesForStatAndNegativeLookup(t *testing.T) {
+	var listCalls int
+	var objectInfoCalls int
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			switch {
+			case strings.Contains(path, "list-files"):
+				listCalls++
+				resp := response.(*listFilesResponse)
+				resp.Objects = []wsfsObjectInfo{
+					{
+						ObjectInfo: workspace.ObjectInfo{
+							Path:       "/test/file1.txt",
+							ObjectType: workspace.ObjectTypeFile,
+							Size:       100,
+							ModifiedAt: time.Now().UnixMilli(),
+						},
+					},
+					{
+						ObjectInfo: workspace.ObjectInfo{
+							Path:       "/test/subdir",
+							ObjectType: workspace.ObjectTypeDirectory,
+							ModifiedAt: time.Now().UnixMilli(),
+						},
+					},
+				}
+				return nil
+			case strings.Contains(path, "object-info"):
+				objectInfoCalls++
+				return fmt.Errorf("unexpected object-info call for %s", path)
+			default:
+				return fmt.Errorf("unexpected path: %s", path)
+			}
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, metacache.NewCacheWithTTLs(10*time.Second, 3*time.Second))
+
+	if _, err := client.ReadDir(context.Background(), "/test"); err != nil {
+		t.Fatalf("ReadDir failed: %v", err)
+	}
+	if _, err := client.Stat(context.Background(), "/test/file1.txt"); err != nil {
+		t.Fatalf("Stat(file1) failed: %v", err)
+	}
+	if _, err := client.Stat(context.Background(), "/test/subdir"); err != nil {
+		t.Fatalf("Stat(subdir) failed: %v", err)
+	}
+	if _, err := client.Stat(context.Background(), "/test/missing.txt"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("expected ErrNotExist for missing child, got %v", err)
+	}
+
+	if listCalls != 1 {
+		t.Fatalf("expected 1 list-files call, got %d", listCalls)
+	}
+	if objectInfoCalls != 0 {
+		t.Fatalf("expected no object-info calls, got %d", objectInfoCalls)
+	}
+}
+
+func TestReadDirSingleflight(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		listCalls int
+	)
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if !strings.Contains(path, "list-files") {
+				return fmt.Errorf("unexpected path: %s", path)
+			}
+			time.Sleep(25 * time.Millisecond)
+			mu.Lock()
+			listCalls++
+			mu.Unlock()
+			resp := response.(*listFilesResponse)
+			resp.Objects = []wsfsObjectInfo{
+				{ObjectInfo: workspace.ObjectInfo{Path: "/test/file.txt", ObjectType: workspace.ObjectTypeFile, ModifiedAt: time.Now().UnixMilli()}},
+			}
+			return nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, metacache.NewCacheWithTTLs(10*time.Second, 3*time.Second))
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := client.ReadDir(context.Background(), "/test")
+			errCh <- err
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("ReadDir failed: %v", err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if listCalls != 1 {
+		t.Fatalf("expected 1 list-files call, got %d", listCalls)
+	}
+}
+
+func TestStatSingleflight(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if !strings.Contains(path, "object-info") {
+				return fmt.Errorf("unexpected path: %s", path)
+			}
+			time.Sleep(25 * time.Millisecond)
+			mu.Lock()
+			calls++
+			mu.Unlock()
+			resp := response.(*objectInfoResponse)
+			resp.WsfsObjectInfo = wsfsObjectInfo{
+				ObjectInfo: workspace.ObjectInfo{
+					Path:       "/test.txt",
+					ObjectType: workspace.ObjectTypeFile,
+					Size:       100,
+					ModifiedAt: time.Now().UnixMilli(),
+				},
+			}
+			return nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, metacache.NewCacheWithTTLs(10*time.Second, 3*time.Second))
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := client.Stat(context.Background(), "/test.txt")
+			errCh <- err
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("Stat failed: %v", err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("expected 1 object-info call, got %d", calls)
 	}
 }
 

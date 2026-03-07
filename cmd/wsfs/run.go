@@ -6,10 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"os"
 	"os/signal"
 	"os/user"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"syscall"
@@ -35,10 +33,6 @@ type cliConfig struct {
 	debug       bool
 	logLevel    string
 	allowOther  bool
-	enableCache bool
-	cacheDir    string
-	cacheSizeGB float64
-	cacheTTL    time.Duration
 	mountPoint  string
 }
 
@@ -61,8 +55,7 @@ type runDeps struct {
 	initWorkspace           func() (*databrickssdk.WorkspaceClient, error)
 	workspaceMe             func(context.Context, *databrickssdk.WorkspaceClient) (string, error)
 	currentUser             func() (*user.User, error)
-	newDiskCache            func(string, int64, time.Duration) (*filecache.DiskCache, error)
-	newDisabledCache        func() *filecache.DiskCache
+	newDiskCache            func() (*filecache.DiskCache, error)
 	newWorkspaceFilesClient func(*databrickssdk.WorkspaceClient) (databricks.WorkspaceFilesAPI, error)
 	newRootNode             func(databricks.WorkspaceFilesAPI, *filecache.DiskCache, string, *wsfsfuse.DirtyNodeRegistry, *wsfsfuse.NodeConfig) (*wsfsfuse.WSNode, error)
 	mount                   func(string, fs.InodeEmbedder, *fs.Options) (mountServer, error)
@@ -82,9 +75,8 @@ func defaultDeps() runDeps {
 			}
 			return me.DisplayName, nil
 		},
-		currentUser:      user.Current,
-		newDiskCache:     filecache.NewDiskCache,
-		newDisabledCache: filecache.NewDisabledCache,
+		currentUser:  user.Current,
+		newDiskCache: filecache.NewDefaultDiskCache,
 		newWorkspaceFilesClient: func(w *databrickssdk.WorkspaceClient) (databricks.WorkspaceFilesAPI, error) {
 			return databricks.NewWorkspaceFilesClient(w)
 		},
@@ -113,10 +105,6 @@ func parseArgs(args []string) (cliConfig, error) {
 	debug := fs.Bool("debug", false, "print debug data (equivalent to --log-level=debug)")
 	logLevel := fs.String("log-level", "info", "log level: debug, info, warn, error")
 	allowOther := fs.Bool("allow-other", false, "allow other users to access the mount")
-	enableCache := fs.Bool("cache", true, "enable disk cache for file contents")
-	cacheDir := fs.String("cache-dir", filepath.Join(os.TempDir(), "wsfs-cache"), "cache directory path")
-	cacheSizeGB := fs.Float64("cache-size", 10, "maximum cache size in GB")
-	cacheTTL := fs.Duration("cache-ttl", 24*time.Hour, "cache TTL (e.g., 24h, 30m)")
 
 	if err := fs.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -130,10 +118,6 @@ func parseArgs(args []string) (cliConfig, error) {
 		debug:       *debug,
 		logLevel:    *logLevel,
 		allowOther:  *allowOther,
-		enableCache: *enableCache,
-		cacheDir:    *cacheDir,
-		cacheSizeGB: *cacheSizeGB,
-		cacheTTL:    *cacheTTL,
 	}
 
 	if fs.NArg() > 0 {
@@ -148,18 +132,6 @@ func parseArgs(args []string) (cliConfig, error) {
 }
 
 func validateConfig(cfg cliConfig) error {
-	if !cfg.enableCache {
-		return nil
-	}
-	if cfg.cacheSizeGB <= 0 {
-		return &cliError{exitCode: 1, msg: fmt.Sprintf("Invalid cache size: %.2f GB (must be positive)", cfg.cacheSizeGB)}
-	}
-	if cfg.cacheSizeGB > 1000 {
-		return &cliError{exitCode: 1, msg: fmt.Sprintf("Invalid cache size: %.2f GB (maximum is 1000 GB)", cfg.cacheSizeGB)}
-	}
-	if cfg.cacheTTL <= 0 {
-		return &cliError{exitCode: 1, msg: fmt.Sprintf("Invalid cache TTL: %v (must be positive)", cfg.cacheTTL)}
-	}
 	return nil
 }
 
@@ -171,9 +143,9 @@ func buildNodeConfig(ownerUid uint32, allowOther bool) *wsfsfuse.NodeConfig {
 }
 
 func buildMountOptions(allowOther bool, debug bool) *fs.Options {
-	attrTimeout := 30 * time.Second
-	entryTimeout := 30 * time.Second
-	negativeTimeout := 10 * time.Second
+	attrTimeout := 10 * time.Second
+	entryTimeout := 10 * time.Second
+	negativeTimeout := 3 * time.Second
 
 	opts := &fs.Options{
 		AttrTimeout:     &attrTimeout,
@@ -228,18 +200,11 @@ func run(args []string, deps runDeps) error {
 	logging.Infof("Hello, %s! Mounting your Databricks workspace...", displayName)
 
 	// Set up disk cache
-	var diskCache *filecache.DiskCache
-	if cfg.enableCache {
-		cacheSizeBytes := int64(cfg.cacheSizeGB * 1024 * 1024 * 1024)
-		diskCache, err = deps.newDiskCache(cfg.cacheDir, cacheSizeBytes, cfg.cacheTTL)
-		if err != nil {
-			return fmt.Errorf("Failed to create disk cache: %w", err)
-		}
-		logging.Debugf("Disk cache enabled: dir=%s, size=%.1fGB, ttl=%v", cfg.cacheDir, cfg.cacheSizeGB, cfg.cacheTTL)
-	} else {
-		diskCache = deps.newDisabledCache()
-		logging.Debugf("Disk cache disabled")
+	diskCache, err := deps.newDiskCache()
+	if err != nil {
+		return fmt.Errorf("Failed to create disk cache: %w", err)
 	}
+	logging.Debugf("Disk cache enabled: dir=%s", diskCache.CacheDir())
 
 	// Set up Databricks FS client
 	wfclient, err := deps.newWorkspaceFilesClient(w)

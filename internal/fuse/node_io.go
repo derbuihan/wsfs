@@ -79,6 +79,7 @@ func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
 
 	// Fallback: keep data in memory (when cache is disabled or failed)
 	n.buf.Data = data
+	n.buf.FileSize = int64(len(data))
 	return 0
 }
 
@@ -144,6 +145,7 @@ func (n *WSNode) flushLocked(ctx context.Context) syscall.Errno {
 		return 0
 	}
 	n.fileInfo = wsInfo
+	n.metadataCheckedAt = time.Now()
 
 	// Update cache with new content
 	if n.diskCache != nil && !n.diskCache.IsDisabled() && n.buf.Data != nil {
@@ -168,24 +170,8 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 		return nil, 0, syscall.EISDIR
 	}
 
-	// Check for remote modifications before using cached data
-	if (n.buf.Data != nil || n.buf.CachedPath != "") && !n.isDirtyLocked() {
-		info, err := n.wfClient.Stat(ctx, n.fileInfo.Path)
-		if err == nil {
-			wsInfo, ok := info.(databricks.WSFileInfo)
-			if ok && wsInfo.ModTime().After(n.fileInfo.ModTime()) {
-				// Remote file was modified, invalidate cache
-				logging.Debugf("Remote file modified, invalidating cache for %s", n.fileInfo.Path)
-				n.buf.Data = nil
-				n.buf.CachedPath = ""
-				n.buf.FileSize = 0
-				n.fileInfo = wsInfo
-				// Also invalidate disk cache
-				if n.diskCache != nil && !n.diskCache.IsDisabled() {
-					n.diskCache.Delete(n.fileInfo.Path)
-				}
-			}
-		}
+	if errno := n.refreshMetadataIfNeededLocked(ctx); errno != 0 {
+		return nil, 0, errno
 	}
 
 	if flags&syscall.O_TRUNC != 0 {
@@ -201,10 +187,7 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 		n.buf.FileSize = 0
 		n.truncateLocked(0)
 		n.markModifiedLocked(time.Now())
-	} else if n.buf.Data == nil && n.buf.CachedPath == "" {
-		if errno := n.ensureDataLocked(ctx); errno != 0 {
-			return nil, 0, errno
-		}
+		n.metadataCheckedAt = time.Now()
 	}
 
 	openFlags := uint32(0)
@@ -366,6 +349,7 @@ func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off i
 
 	n.fileInfo.ObjectInfo.Size = int64(len(n.buf.Data))
 	n.markModifiedLocked(time.Now())
+	n.metadataCheckedAt = time.Now()
 	n.markDirtyLocked(dirtyData)
 
 	return uint32(len(data)), 0

@@ -46,24 +46,49 @@ func calculateFileChecksum(path string) (string, error) {
 
 // DiskCache manages on-disk file caching with LRU and TTL eviction
 type DiskCache struct {
-	cacheDir      string
-	maxSizeBytes  int64
-	ttl           time.Duration
-	entries       map[string]*Entry // remotePath -> Entry
-	totalSize     int64
-	mu            sync.RWMutex
-	disabled      bool
+	cacheDir     string
+	maxSizeBytes int64
+	ttl          time.Duration
+	entries      map[string]*Entry // remotePath -> Entry
+	totalSize    int64
+	mu           sync.RWMutex
+	disabled     bool
 }
 
-// NewDiskCache creates a new disk cache
-// If maxSizeBytes is 0, defaults to 10GB
-// If ttl is 0, defaults to 24 hours
+const (
+	DefaultMaxSizeBytes int64 = 5 * 1024 * 1024 * 1024
+	DefaultTTL                = 7 * 24 * time.Hour
+)
+
+func DefaultCacheDir() (string, error) {
+	if base, err := os.UserCacheDir(); err == nil && base != "" {
+		return filepath.Join(base, "wsfs"), nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve cache dir: %w", err)
+	}
+	return filepath.Join(home, ".cache", "wsfs"), nil
+}
+
+func NewDefaultDiskCache() (*DiskCache, error) {
+	cacheDir, err := DefaultCacheDir()
+	if err != nil {
+		return nil, err
+	}
+	return NewDiskCache(cacheDir, DefaultMaxSizeBytes, DefaultTTL)
+}
+
+// NewDiskCache creates a new disk cache.
+// If maxSizeBytes is 0, it uses the zero-config default.
+// If ttl is 0, it uses the zero-config default.
 func NewDiskCache(cacheDir string, maxSizeBytes int64, ttl time.Duration) (*DiskCache, error) {
 	if maxSizeBytes == 0 {
-		maxSizeBytes = 10 * 1024 * 1024 * 1024 // 10GB default
+		maxSizeBytes = DefaultMaxSizeBytes
 	}
 	if ttl == 0 {
-		ttl = 24 * time.Hour // 24 hours default
+		ttl = DefaultTTL
 	}
 
 	// Create cache directory if it doesn't exist
@@ -100,6 +125,10 @@ func NewDisabledCache() *DiskCache {
 // IsDisabled returns true if cache is disabled
 func (c *DiskCache) IsDisabled() bool {
 	return c.disabled
+}
+
+func (c *DiskCache) CacheDir() string {
+	return c.cacheDir
 }
 
 // Get retrieves a cached file if it exists and is valid

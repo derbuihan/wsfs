@@ -3,6 +3,7 @@ package databricks
 import (
 	"context"
 	"io/fs"
+	"time"
 )
 
 // WorkspaceFilesAPI defines the minimal surface WSNode needs.
@@ -17,4 +18,5 @@ type WorkspaceFilesAPI interface {
 	Rename(ctx context.Context, sourcePath string, destinationPath string) error
 	CacheSet(path string, info fs.FileInfo)
 	CacheInvalidate(filePath string)
+	MetadataTTL() time.Duration
 }

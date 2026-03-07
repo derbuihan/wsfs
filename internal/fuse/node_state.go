@@ -18,8 +18,8 @@ import (
 // File system constants
 const (
 	// Attribute and entry cache timeouts in seconds
-	attrTimeoutSec  = 60
-	entryTimeoutSec = 60
+	attrTimeoutSec  = 10
+	entryTimeoutSec = 10
 
 	// File permissions
 	dirMode  = 0755
@@ -81,17 +81,18 @@ const (
 
 type WSNode struct {
 	fs.Inode
-	wfClient        databricks.WorkspaceFilesAPI
-	diskCache       *filecache.DiskCache
-	fileInfo        databricks.WSFileInfo
-	buf             fileBuffer
-	mu              sync.Mutex
-	registry        *DirtyNodeRegistry
-	ownerUid        uint32 // UID of the mount owner
-	restrictAccess  bool   // Enforce access control when true
-	openCount       int
-	dirtyFlags      dirtyFlag
-	pendingTruncate bool
+	wfClient          databricks.WorkspaceFilesAPI
+	diskCache         *filecache.DiskCache
+	fileInfo          databricks.WSFileInfo
+	buf               fileBuffer
+	mu                sync.Mutex
+	registry          *DirtyNodeRegistry
+	ownerUid          uint32 // UID of the mount owner
+	restrictAccess    bool   // Enforce access control when true
+	openCount         int
+	dirtyFlags        dirtyFlag
+	pendingTruncate   bool
+	metadataCheckedAt time.Time
 }
 
 var _ = (fs.NodeGetattrer)((*WSNode)(nil))
@@ -198,6 +199,15 @@ func (n *WSNode) resetBufferLocked() {
 	n.clearDirtyLocked()
 }
 
+func (n *WSNode) clearCleanBufferLocked() {
+	if n.isDirtyLocked() {
+		return
+	}
+	n.buf.Data = nil
+	n.buf.CachedPath = ""
+	n.buf.FileSize = 0
+}
+
 func NewRootNode(wfClient databricks.WorkspaceFilesAPI, diskCache *filecache.DiskCache, rootPath string, registry *DirtyNodeRegistry, config *NodeConfig) (*WSNode, error) {
 	info, err := wfClient.Stat(context.Background(), rootPath)
 
@@ -214,10 +224,11 @@ func NewRootNode(wfClient databricks.WorkspaceFilesAPI, diskCache *filecache.Dis
 	}
 
 	node := &WSNode{
-		wfClient:  wfClient,
-		diskCache: diskCache,
-		fileInfo:  wsInfo,
-		registry:  registry,
+		wfClient:          wfClient,
+		diskCache:         diskCache,
+		fileInfo:          wsInfo,
+		registry:          registry,
+		metadataCheckedAt: time.Now(),
 	}
 
 	// Apply access control configuration

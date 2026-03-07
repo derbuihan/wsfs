@@ -86,6 +86,8 @@ func (f *fakeWorkspaceFilesClient) CacheSet(path string, info iofs.FileInfo) {}
 
 func (f *fakeWorkspaceFilesClient) CacheInvalidate(filePath string) {}
 
+func (f *fakeWorkspaceFilesClient) MetadataTTL() time.Duration { return time.Second }
+
 func TestParseArgsDefaultsAndMountpoint(t *testing.T) {
 	cfg, err := parseArgs([]string{"wsfs", "/mnt/wsfs"})
 	if err != nil {
@@ -97,9 +99,6 @@ func TestParseArgsDefaultsAndMountpoint(t *testing.T) {
 	if cfg.logLevel != "info" {
 		t.Fatalf("logLevel = %q", cfg.logLevel)
 	}
-	if !cfg.enableCache {
-		t.Fatal("enableCache should default to true")
-	}
 }
 
 func TestParseArgsOverrides(t *testing.T) {
@@ -108,20 +107,13 @@ func TestParseArgsOverrides(t *testing.T) {
 		"--debug",
 		"--log-level=warn",
 		"--allow-other",
-		"--cache=false",
-		"--cache-dir=/tmp/cache",
-		"--cache-size=12",
-		"--cache-ttl=30m",
 		"/mnt/wsfs",
 	})
 	if err != nil {
 		t.Fatalf("parseArgs failed: %v", err)
 	}
-	if !cfg.debug || cfg.logLevel != "warn" || !cfg.allowOther || cfg.enableCache {
+	if !cfg.debug || cfg.logLevel != "warn" || !cfg.allowOther {
 		t.Fatalf("unexpected flags: %+v", cfg)
-	}
-	if cfg.cacheDir != "/tmp/cache" || cfg.cacheSizeGB != 12 || cfg.cacheTTL != 30*time.Minute {
-		t.Fatalf("unexpected cache config: %+v", cfg)
 	}
 }
 
@@ -133,30 +125,9 @@ func TestParseArgsMissingMountpoint(t *testing.T) {
 }
 
 func TestValidateConfig(t *testing.T) {
-	cfg := cliConfig{enableCache: true, cacheSizeGB: 10, cacheTTL: time.Hour}
+	cfg := cliConfig{}
 	if err := validateConfig(cfg); err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-
-	cfg.cacheSizeGB = 0
-	if err := validateConfig(cfg); err == nil {
-		t.Fatal("expected size error")
-	}
-
-	cfg.cacheSizeGB = 1001
-	if err := validateConfig(cfg); err == nil {
-		t.Fatal("expected max size error")
-	}
-
-	cfg.cacheSizeGB = 10
-	cfg.cacheTTL = 0
-	if err := validateConfig(cfg); err == nil {
-		t.Fatal("expected ttl error")
-	}
-
-	cfg.enableCache = false
-	if err := validateConfig(cfg); err != nil {
-		t.Fatalf("unexpected error with cache disabled: %v", err)
 	}
 }
 
@@ -242,10 +213,9 @@ func TestRunSuccess(t *testing.T) {
 	deps.currentUser = func() (*user.User, error) {
 		return &user.User{Uid: "123"}, nil
 	}
-	deps.newDiskCache = func(path string, size int64, ttl time.Duration) (*filecache.DiskCache, error) {
+	deps.newDiskCache = func() (*filecache.DiskCache, error) {
 		return filecache.NewDisabledCache(), nil
 	}
-	deps.newDisabledCache = func() *filecache.DiskCache { return filecache.NewDisabledCache() }
 	deps.newWorkspaceFilesClient = func(*databrickssdk.WorkspaceClient) (databricks.WorkspaceFilesAPI, error) {
 		return &fakeWorkspaceFilesClient{}, nil
 	}
@@ -337,35 +307,6 @@ func TestRunMountOptionsUsesAllowOther(t *testing.T) {
 	}
 }
 
-func TestRunUsesCacheDisabled(t *testing.T) {
-	deps := defaultDeps()
-	deps.initWorkspace = func() (*databrickssdk.WorkspaceClient, error) {
-		return &databrickssdk.WorkspaceClient{}, nil
-	}
-	deps.workspaceMe = func(ctx context.Context, w *databrickssdk.WorkspaceClient) (string, error) {
-		return "Tester", nil
-	}
-	deps.currentUser = func() (*user.User, error) {
-		return &user.User{Uid: "123"}, nil
-	}
-	deps.newWorkspaceFilesClient = func(*databrickssdk.WorkspaceClient) (databricks.WorkspaceFilesAPI, error) {
-		return &fakeWorkspaceFilesClient{}, nil
-	}
-	deps.newDisabledCache = func() *filecache.DiskCache { return filecache.NewDisabledCache() }
-	deps.mount = func(mountPoint string, root fs.InodeEmbedder, opts *fs.Options) (mountServer, error) {
-		return &fakeServer{waitCh: make(chan struct{})}, nil
-	}
-	deps.signalContext = func() (context.Context, context.CancelFunc) {
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		return ctx, func() {}
-	}
-
-	if err := run([]string{"wsfs", "--cache=false", "/mnt/wsfs"}, deps); err != nil {
-		t.Fatalf("run failed: %v", err)
-	}
-}
-
 func TestRunUsesCacheEnabledError(t *testing.T) {
 	deps := defaultDeps()
 	deps.initWorkspace = func() (*databrickssdk.WorkspaceClient, error) {
@@ -377,7 +318,7 @@ func TestRunUsesCacheEnabledError(t *testing.T) {
 	deps.currentUser = func() (*user.User, error) {
 		return &user.User{Uid: "123"}, nil
 	}
-	deps.newDiskCache = func(path string, size int64, ttl time.Duration) (*filecache.DiskCache, error) {
+	deps.newDiskCache = func() (*filecache.DiskCache, error) {
 		return nil, fmt.Errorf("cache error")
 	}
 	deps.newWorkspaceFilesClient = func(*databrickssdk.WorkspaceClient) (databricks.WorkspaceFilesAPI, error) {
@@ -569,14 +510,14 @@ func TestParseArgsUsageMessage(t *testing.T) {
 	}
 }
 
-func TestValidateConfigCacheDisabled(t *testing.T) {
-	cfg := cliConfig{enableCache: false, cacheSizeGB: -1, cacheTTL: -1}
+func TestValidateConfigNoop(t *testing.T) {
+	cfg := cliConfig{}
 	if err := validateConfig(cfg); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestRunCacheSizeCalculation(t *testing.T) {
+func TestRunUsesDefaultDiskCacheFactory(t *testing.T) {
 	deps := defaultDeps()
 	deps.initWorkspace = func() (*databrickssdk.WorkspaceClient, error) {
 		return &databrickssdk.WorkspaceClient{}, nil
@@ -591,9 +532,9 @@ func TestRunCacheSizeCalculation(t *testing.T) {
 		return &fakeWorkspaceFilesClient{}, nil
 	}
 
-	var gotSize int64
-	deps.newDiskCache = func(path string, size int64, ttl time.Duration) (*filecache.DiskCache, error) {
-		gotSize = size
+	var called bool
+	deps.newDiskCache = func() (*filecache.DiskCache, error) {
+		called = true
 		return filecache.NewDisabledCache(), nil
 	}
 	deps.mount = func(mountPoint string, root fs.InodeEmbedder, opts *fs.Options) (mountServer, error) {
@@ -605,13 +546,11 @@ func TestRunCacheSizeCalculation(t *testing.T) {
 		return ctx, func() {}
 	}
 
-	if err := run([]string{"wsfs", "--cache-size=1.5", "/mnt/wsfs"}, deps); err != nil {
+	if err := run([]string{"wsfs", "/mnt/wsfs"}, deps); err != nil {
 		t.Fatalf("run failed: %v", err)
 	}
-
-	expected := int64(1.5 * 1024 * 1024 * 1024)
-	if gotSize != expected {
-		t.Fatalf("cache size bytes = %d, want %d", gotSize, expected)
+	if !called {
+		t.Fatal("expected disk cache factory to be called")
 	}
 }
 
@@ -675,7 +614,7 @@ func TestParseArgsMountPointIgnoredForVersion(t *testing.T) {
 	}
 }
 
-func TestParseArgsInvalidDuration(t *testing.T) {
+func TestParseArgsRejectsRemovedCacheFlags(t *testing.T) {
 	_, err := parseArgs([]string{"wsfs", "--cache-ttl=invalid", "/mnt/wsfs"})
 	if err == nil {
 		t.Fatal("expected error")
@@ -712,29 +651,10 @@ func TestParseArgsAllowOtherDefaultFalse(t *testing.T) {
 	}
 }
 
-func TestParseArgsCacheDefaults(t *testing.T) {
-	cfg, err := parseArgs([]string{"wsfs", "/mnt/wsfs"})
-	if err != nil {
-		t.Fatalf("parseArgs failed: %v", err)
-	}
-	if !cfg.enableCache {
-		t.Fatal("enableCache should default to true")
-	}
-	if cfg.cacheSizeGB <= 0 {
-		t.Fatal("cacheSizeGB should be > 0")
-	}
-	if cfg.cacheTTL <= 0 {
-		t.Fatal("cacheTTL should be > 0")
-	}
-}
-
-func TestParseArgsCacheSizeFloat(t *testing.T) {
-	cfg, err := parseArgs([]string{"wsfs", "--cache-size=1.25", "/mnt/wsfs"})
-	if err != nil {
-		t.Fatalf("parseArgs failed: %v", err)
-	}
-	if cfg.cacheSizeGB != 1.25 {
-		t.Fatalf("cacheSizeGB = %v", cfg.cacheSizeGB)
+func TestParseArgsRejectsRemovedCacheSizeFlag(t *testing.T) {
+	_, err := parseArgs([]string{"wsfs", "--cache-size=1.25", "/mnt/wsfs"})
+	if err == nil {
+		t.Fatal("expected error")
 	}
 }
 

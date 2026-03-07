@@ -2,6 +2,7 @@ package metacache
 
 import (
 	"io/fs"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -305,6 +306,70 @@ func TestCacheTTLUpdate(t *testing.T) {
 	}
 	if info.Size() != 200 {
 		t.Errorf("Expected size 200, got %d", info.Size())
+	}
+}
+
+type mockDirEntry struct {
+	name  string
+	isDir bool
+	info  fs.FileInfo
+}
+
+func (m mockDirEntry) Name() string               { return m.name }
+func (m mockDirEntry) IsDir() bool                { return m.isDir }
+func (m mockDirEntry) Type() fs.FileMode          { return m.info.Mode() }
+func (m mockDirEntry) Info() (fs.FileInfo, error) { return m.info, nil }
+
+func TestCacheDirEntriesLookup(t *testing.T) {
+	c := NewCacheWithTTLs(10*time.Second, 3*time.Second)
+	info := newMockFileInfo("file.txt", 10, false)
+
+	c.SetDirEntries(
+		"/dir",
+		[]fs.DirEntry{
+			mockDirEntry{name: "file.txt", info: info},
+		},
+		[]DirLookupEntry{
+			{Name: "file.txt", Info: info},
+		},
+	)
+
+	entries, found := c.GetDirEntries("/dir")
+	if !found {
+		t.Fatal("expected cached directory entries")
+	}
+	if len(entries) != 1 || entries[0].Name() != "file.txt" {
+		t.Fatalf("unexpected directory entries: %+v", entries)
+	}
+
+	got, found := c.LookupDirEntry(filepath.Join("/dir", "file.txt"))
+	if !found || got == nil {
+		t.Fatal("expected lookup hit from directory cache")
+	}
+	if got.Name() != "file.txt" {
+		t.Fatalf("unexpected lookup info: %v", got.Name())
+	}
+
+	missing, found := c.LookupDirEntry(filepath.Join("/dir", "missing.txt"))
+	if !found {
+		t.Fatal("expected fresh directory cache to answer negative lookup")
+	}
+	if missing != nil {
+		t.Fatal("expected nil info for missing directory child")
+	}
+}
+
+func TestCacheNegativeTTL(t *testing.T) {
+	c := NewCacheWithTTLs(10*time.Second, 50*time.Millisecond)
+	c.Set("/missing.txt", nil)
+
+	if _, found := c.Get("/missing.txt"); !found {
+		t.Fatal("expected negative entry immediately")
+	}
+
+	time.Sleep(80 * time.Millisecond)
+	if _, found := c.Get("/missing.txt"); found {
+		t.Fatal("expected negative entry to expire on negative TTL")
 	}
 }
 
