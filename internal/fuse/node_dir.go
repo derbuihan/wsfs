@@ -46,6 +46,93 @@ func validateChildPath(parentPath, childName string) (string, error) {
 	return cleanPath, nil
 }
 
+func notebookVisibleEntryName(info databricks.WSFileInfo, usedNames map[string]struct{}) (string, bool) {
+	preferred := pathutil.NotebookVisibleName(info.Name(), info.Language)
+	if _, exists := usedNames[preferred]; !exists {
+		usedNames[preferred] = struct{}{}
+		return preferred, true
+	}
+
+	fallback := pathutil.NotebookFallbackName(info.Name())
+	if _, exists := usedNames[fallback]; exists {
+		logging.Debugf("Readdir: hiding notebook %s because both %s and %s collide", info.Path, preferred, fallback)
+		return "", false
+	}
+
+	usedNames[fallback] = struct{}{}
+	return fallback, true
+}
+
+func renameTargetPath(sourceInfo databricks.WSFileInfo, visiblePath string) string {
+	if sourceInfo.IsNotebook() {
+		if actualPath, _, ok := pathutil.NotebookRemotePathFromSourcePath(visiblePath); ok {
+			return actualPath
+		}
+		if actualPath, ok := pathutil.NotebookRemotePathFromFallbackPath(visiblePath); ok {
+			return actualPath
+		}
+	}
+	return visiblePath
+}
+
+func refreshRenamedNode(ctx context.Context, wfClient databricks.WorkspaceFilesAPI, inode *fs.Inode, visiblePath string, actualPath string) {
+	if inode == nil {
+		return
+	}
+
+	node, ok := inode.Operations().(*WSNode)
+	if !ok {
+		return
+	}
+
+	info, err := wfClient.Stat(ctx, visiblePath)
+	if err != nil {
+		info, err = wfClient.Stat(ctx, actualPath)
+		if err != nil {
+			logging.Debugf("Rename: failed to refresh node info for %s: %v", visiblePath, err)
+			return
+		}
+	}
+
+	wsInfo, ok := info.(databricks.WSFileInfo)
+	if !ok {
+		logging.Debugf("Rename: unexpected refreshed file info type for %s", visiblePath)
+		return
+	}
+
+	node.mu.Lock()
+	defer node.mu.Unlock()
+
+	logging.Debugf(
+		"Rename: refreshing in-memory node for %s (dirty=%v openCount=%d oldPath=%s newPath=%s language=%s)",
+		visiblePath,
+		node.isDirtyLocked(),
+		node.openCount,
+		node.fileInfo.Path,
+		wsInfo.Path,
+		wsInfo.Language,
+	)
+	node.fileInfo = wsInfo
+	node.resetBufferLocked()
+	node.buf.ReplaceOnFirstWrite = false
+}
+
+func notifyContentIfPossible(inode *fs.Inode, path string) {
+	if inode == nil {
+		return
+	}
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logging.Debugf("Rename: skipping kernel content invalidation for %s: %v", path, recovered)
+		}
+	}()
+
+	if errno := inode.NotifyContent(0, 0); errno != 0 {
+		logging.Debugf("Rename: failed to invalidate kernel content cache for %s: %v", path, errno)
+	}
+}
+
 func (n *WSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	logging.Debugf("Readdir called on path: %s", n.Path())
 
@@ -61,18 +148,34 @@ func (n *WSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		return nil, syscall.EIO
 	}
 
-	fuseEntries := make([]fuse.DirEntry, len(entries))
-	for i, e := range entries {
+	fuseEntries := make([]fuse.DirEntry, 0, len(entries))
+	usedNames := make(map[string]struct{}, len(entries))
+
+	for _, e := range entries {
 		mode := uint32(syscall.S_IFREG)
 		if e.IsDir() {
 			mode = uint32(syscall.S_IFDIR)
 		}
-		name := e.Name()
-		// Add .ipynb extension for notebooks
-		if wsEntry, ok := e.(databricks.WSDirEntry); ok {
-			name = pathutil.ToFuseName(name, wsEntry.IsNotebook())
+		wsEntry, ok := e.(databricks.WSDirEntry)
+		if ok && wsEntry.IsNotebook() {
+			continue
 		}
-		fuseEntries[i] = fuse.DirEntry{Name: name, Mode: mode}
+		name := e.Name()
+		usedNames[name] = struct{}{}
+		fuseEntries = append(fuseEntries, fuse.DirEntry{Name: name, Mode: mode})
+	}
+
+	for _, e := range entries {
+		wsEntry, ok := e.(databricks.WSDirEntry)
+		if !ok || !wsEntry.IsNotebook() {
+			continue
+		}
+
+		name, visible := notebookVisibleEntryName(wsEntry.WSFileInfo, usedNames)
+		if !visible {
+			continue
+		}
+		fuseEntries = append(fuseEntries, fuse.DirEntry{Name: name, Mode: uint32(syscall.S_IFREG)})
 	}
 
 	return fs.NewListDirStream(fuseEntries), 0
@@ -105,10 +208,15 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 					out.Attr.Size = uint64(len(existingNode.buf.Data))
 					out.Attr.Blocks = (out.Attr.Size + blockFactor - 1) / blockFactor
 				}
+				logging.Debugf(
+					"Lookup: returning existing dirty node for %s (openCount=%d size=%d)",
+					childPath,
+					existingNode.openCount,
+					len(existingNode.buf.Data),
+				)
 				existingNode.mu.Unlock()
 				out.SetEntryTimeout(entryTimeoutSec)
 				out.SetAttrTimeout(attrTimeoutSec)
-				logging.Debugf("Lookup: returning existing dirty node for %s", childPath)
 				return existingChild, 0
 			}
 			existingNode.mu.Unlock()
@@ -180,12 +288,9 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 		return nil, nil, 0, syscall.EINVAL
 	}
 
-	// For .ipynb files, create an empty Jupyter notebook
 	var initialContent []byte
-	if pathutil.HasNotebookSuffix(name) {
-		initialContent = []byte(`{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":4}`)
-	} else {
-		initialContent = []byte{}
+	if _, language, ok := pathutil.NotebookRemotePathFromSourcePath(name); ok {
+		initialContent = []byte(pathutil.NotebookSourceHeader(language) + "\n")
 	}
 
 	opCtx, cancel := context.WithTimeout(ctx, dataOpTimeout)
@@ -212,7 +317,7 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 		wfClient:       n.wfClient,
 		diskCache:      n.diskCache,
 		fileInfo:       wsInfo,
-		buf:            fileBuffer{Data: initialContent},
+		buf:            fileBuffer{Data: initialContent, ReplaceOnFirstWrite: len(initialContent) > 0},
 		registry:       n.registry,
 		ownerUid:       n.ownerUid,
 		restrictAccess: n.restrictAccess,
@@ -224,7 +329,7 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 	out.SetAttrTimeout(attrTimeoutSec)
 
 	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode), Ino: stableIno(wsInfo)})
-	return child, nil, fuse.FOPEN_KEEP_CACHE, 0
+	return child, &wsFileHandle{}, fuse.FOPEN_KEEP_CACHE, 0
 }
 
 func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
@@ -254,8 +359,10 @@ func (n *WSNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return syscall.EIO
 	}
 
-	// Remove from cache (use remote path without .ipynb suffix)
-	actualPath := pathutil.ToRemotePath(childPath)
+	actualPath := childPath
+	if wsInfo, ok := info.(databricks.WSFileInfo); ok {
+		actualPath = wsInfo.Path
+	}
 	if n.diskCache != nil && !n.diskCache.IsDisabled() {
 		if err := n.diskCache.Delete(actualPath); err != nil {
 			logging.Debugf("Failed to delete from cache %s: %v", actualPath, err)
@@ -360,23 +467,41 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 
 	opCtx, cancel := context.WithTimeout(ctx, metadataOpTimeout)
 	defer cancel()
+	info, err := n.wfClient.Stat(opCtx, oldPath)
+	if err != nil {
+		return syscall.ENOENT
+	}
+
+	wsInfo, ok := info.(databricks.WSFileInfo)
+	if !ok {
+		logging.Debugf("Rename: unexpected file info type for %s", oldPath)
+		return syscall.EIO
+	}
+
 	err = n.wfClient.Rename(opCtx, oldPath, newPath)
 	if err != nil {
 		logging.Warnf("Error renaming %s to %s: %v", oldPath, newPath, err)
 		return syscall.EIO
 	}
 
-	// Delete old path from cache (use remote path without .ipynb suffix)
-	actualOldPath := pathutil.ToRemotePath(oldPath)
-	actualNewPath := pathutil.ToRemotePath(newPath)
+	actualOldPath := wsInfo.Path
+	actualNewPath := renameTargetPath(wsInfo, newPath)
 	if n.diskCache != nil && !n.diskCache.IsDisabled() {
 		if err := n.diskCache.Delete(actualOldPath); err != nil {
 			logging.Debugf("Failed to delete old path from cache %s: %v", actualOldPath, err)
+		}
+		if err := n.diskCache.Delete(actualNewPath); err != nil {
+			logging.Debugf("Failed to delete new path from cache %s: %v", actualNewPath, err)
 		}
 	}
 
 	childInode := n.GetChild(name)
 	if childInode != nil {
+		if wsInfo.IsNotebook() && actualOldPath == actualNewPath && oldPath != newPath {
+			logging.Debugf("Rename: notebook language-only rename detected for %s -> %s", oldPath, newPath)
+			refreshRenamedNode(opCtx, n.wfClient, childInode, newPath, actualNewPath)
+			notifyContentIfPossible(childInode, newPath)
+		}
 		updateSubtreePaths(childInode, actualOldPath, actualNewPath)
 	}
 

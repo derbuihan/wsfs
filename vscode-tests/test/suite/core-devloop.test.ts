@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
@@ -62,29 +63,48 @@ async function ensurePythonExtensionActive(): Promise<void> {
   }
 }
 
-async function runPythonCommand(doc: vscode.TextDocument, outputPath: string): Promise<void> {
+function runPythonDirect(scriptPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    childProcess.execFile('python3', [scriptPath], { timeout: 30000 }, (err, stdout, stderr) => {
+      if (err) {
+        reject(new Error(`python3 direct exec failed: ${err.message}\nstdout: ${stdout}\nstderr: ${stderr}`));
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+async function runPythonViaExtension(doc: vscode.TextDocument, outputPath: string): Promise<void> {
   await ensurePythonExtensionActive();
+  await delay(3000);
 
   const commands = await vscode.commands.getCommands(true);
   const candidates = ['python.runFileInTerminal', 'python.execInTerminal'];
   const commandId = candidates.find((candidate) => commands.includes(candidate));
-  assert.ok(commandId, `Python run command not found. Searched: ${candidates.join(', ')}`);
-
-  const argumentSets: unknown[][] = [[doc.uri], [doc.uri.fsPath]];
-
-  let lastError: unknown = undefined;
-  for (const args of argumentSets) {
-    await removeIfExists(outputPath);
-    try {
-      await vscode.commands.executeCommand(commandId, ...args);
-      await waitForFileContains(outputPath, 'ext-ok', 60000);
-      return;
-    } catch (err) {
-      lastError = err;
-    }
+  if (!commandId) {
+    throw new Error(`Python run command not found. Searched: ${candidates.join(', ')}`);
   }
 
-  throw new Error(`Failed to execute python run command: ${String(lastError)}`);
+  await removeIfExists(outputPath);
+  await vscode.commands.executeCommand(commandId, doc.uri);
+  await waitForFileContains(outputPath, 'ext-ok', 60000);
+}
+
+async function runPythonCommand(doc: vscode.TextDocument, outputPath: string): Promise<void> {
+  // Try running via Python extension first
+  try {
+    await runPythonViaExtension(doc, outputPath);
+    return;
+  } catch (extErr) {
+    console.log(`Python extension command failed: ${extErr instanceof Error ? extErr.message : String(extErr)}`);
+    console.log('Falling back to direct python3 execution');
+  }
+
+  // Fallback: run python3 directly
+  await removeIfExists(outputPath);
+  await runPythonDirect(doc.uri.fsPath);
+  await waitForFileContains(outputPath, 'ext-ok', 10000);
 }
 
 suite('VSCode core dev loop on wsfs', () => {

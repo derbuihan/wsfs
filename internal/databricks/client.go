@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/databricks/databricks-sdk-go"
+	"github.com/databricks/databricks-sdk-go/apierr"
 	"github.com/databricks/databricks-sdk-go/client"
 	"github.com/databricks/databricks-sdk-go/service/workspace"
 
@@ -73,6 +75,16 @@ func truncateBody(body string, maxLen int) string {
 		return body
 	}
 	return body[:maxLen] + "...[truncated]"
+}
+
+func normalizeNotExistError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, fs.ErrNotExist) || apierr.IsMissing(err) {
+		return fs.ErrNotExist
+	}
+	return err
 }
 
 // WSFileInfo
@@ -179,6 +191,7 @@ type workspaceClient interface {
 	Delete(ctx context.Context, request workspace.Delete) error
 	Mkdirs(ctx context.Context, request workspace.Mkdirs) error
 	Import(ctx context.Context, request workspace.Import) error
+	Upload(ctx context.Context, path string, r io.Reader, opts ...workspace.UploadOption) error
 }
 
 type WorkspaceFilesClient struct {
@@ -208,20 +221,99 @@ func NewWorkspaceFilesClientWithDeps(workspaceClient workspaceClient, apiClient 
 }
 
 func (c *WorkspaceFilesClient) Stat(ctx context.Context, filePath string) (fs.FileInfo, error) {
-	// Handle .ipynb suffix - try to find a notebook without the extension
-	if pathutil.HasNotebookSuffix(filePath) {
-		basePath := pathutil.ToRemotePath(filePath)
-		info, err := c.statInternal(ctx, basePath)
-		if err == nil {
-			wsInfo, ok := toWSFileInfo(info)
-			if ok && wsInfo.IsNotebook() {
-				return info, nil
-			}
-		}
-		// Not a notebook, return not found
+	info, err := c.statInternal(ctx, filePath)
+	if err == nil {
+		return info, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+
+	info, err = c.statNotebookBySourceAlias(ctx, filePath)
+	if err == nil {
+		return info, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+
+	info, err = c.statNotebookByFallbackAlias(ctx, filePath)
+	if err == nil {
+		return info, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+
+	return nil, fs.ErrNotExist
+}
+
+func (c *WorkspaceFilesClient) statNotebookBySourceAlias(ctx context.Context, filePath string) (fs.FileInfo, error) {
+	actualPath, language, ok := pathutil.NotebookRemotePathFromSourcePath(filePath)
+	if !ok {
 		return nil, fs.ErrNotExist
 	}
-	return c.statInternal(ctx, filePath)
+
+	info, err := c.statInternal(ctx, actualPath)
+	if err != nil {
+		return nil, err
+	}
+
+	wsInfo, ok := toWSFileInfo(info)
+	if !ok || !wsInfo.IsNotebook() || wsInfo.Language != language {
+		return nil, fs.ErrNotExist
+	}
+
+	return wsInfo, nil
+}
+
+func (c *WorkspaceFilesClient) statNotebookByFallbackAlias(ctx context.Context, filePath string) (fs.FileInfo, error) {
+	actualPath, ok := pathutil.NotebookRemotePathFromFallbackPath(filePath)
+	if !ok {
+		return nil, fs.ErrNotExist
+	}
+
+	info, err := c.statInternal(ctx, actualPath)
+	if err != nil {
+		return nil, err
+	}
+
+	wsInfo, ok := toWSFileInfo(info)
+	if !ok || !wsInfo.IsNotebook() {
+		return nil, fs.ErrNotExist
+	}
+
+	preferredVisiblePath := pathutil.NotebookVisiblePath(wsInfo.Path, wsInfo.Language)
+	if preferredVisiblePath == filePath {
+		return wsInfo, nil
+	}
+
+	collides, err := c.exactNonNotebookExists(ctx, preferredVisiblePath)
+	if err != nil {
+		return nil, err
+	}
+	if collides {
+		return wsInfo, nil
+	}
+
+	return nil, fs.ErrNotExist
+}
+
+func (c *WorkspaceFilesClient) exactNonNotebookExists(ctx context.Context, filePath string) (bool, error) {
+	info, err := c.statInternal(ctx, filePath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	wsInfo, ok := toWSFileInfo(info)
+	if !ok {
+		return true, nil
+	}
+
+	return !wsInfo.IsNotebook(), nil
 }
 
 func (c *WorkspaceFilesClient) statInternal(ctx context.Context, filePath string) (fs.FileInfo, error) {
@@ -256,7 +348,7 @@ func (c *WorkspaceFilesClient) statInternal(ctx context.Context, filePath string
 	err := c.apiClient.Do(ctx, http.MethodGet, urlPath, nil, nil, nil, &resp)
 	if err != nil {
 		c.cache.Set(filePath, nil)
-		return nil, err
+		return nil, normalizeNotExistError(err)
 	}
 
 	apiInfo := WSFileInfo{ObjectInfo: resp.WsfsObjectInfo.ObjectInfo}
@@ -290,7 +382,7 @@ func (c *WorkspaceFilesClient) ReadDir(ctx context.Context, dirPath string) ([]f
 	)
 
 	if err := c.apiClient.Do(ctx, http.MethodGet, urlPath, nil, nil, nil, &resp); err != nil {
-		return nil, err
+		return nil, normalizeNotExistError(err)
 	}
 
 	entries := make([]fs.DirEntry, len(resp.Objects))
@@ -339,10 +431,10 @@ func (c *WorkspaceFilesClient) readViaSignedURL(ctx context.Context, url string,
 	return io.ReadAll(resp.Body)
 }
 
-func (c *WorkspaceFilesClient) exportNotebook(ctx context.Context, filepath string) ([]byte, error) {
+func (c *WorkspaceFilesClient) exportNotebookSource(ctx context.Context, filepath string) ([]byte, error) {
 	resp, err := c.workspaceClient.Export(ctx, workspace.ExportRequest{
 		Path:   filepath,
-		Format: workspace.ExportFormatJupyter,
+		Format: workspace.ExportFormatSource,
 	})
 	if err != nil {
 		return nil, err
@@ -351,7 +443,7 @@ func (c *WorkspaceFilesClient) exportNotebook(ctx context.Context, filepath stri
 }
 
 func (c *WorkspaceFilesClient) notebookSize(ctx context.Context, filepath string) (int64, error) {
-	data, err := c.exportNotebook(ctx, filepath)
+	data, err := c.exportNotebookSource(ctx, filepath)
 	if err != nil {
 		return 0, err
 	}
@@ -359,10 +451,6 @@ func (c *WorkspaceFilesClient) notebookSize(ctx context.Context, filepath string
 }
 
 func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]byte, error) {
-	// Strip .ipynb suffix to get the actual remote path
-	actualPath := pathutil.ToRemotePath(filePath)
-
-	// 1. Get signed URL from object-info (may already be cached in Stat())
 	info, err := c.Stat(ctx, filePath)
 	if err != nil {
 		return nil, err
@@ -373,10 +461,15 @@ func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]
 		return nil, fmt.Errorf("unexpected file info type for %s", filePath)
 	}
 
-	// For notebooks, use Export with JUPYTER format
+	actualPath := wsInfo.Path
+	if actualPath == "" {
+		actualPath = filePath
+	}
+
+	// For notebooks, use Export with SOURCE format.
 	if wsInfo.IsNotebook() {
-		logging.Debugf("Read notebook via Export (JUPYTER format) for path: %s", actualPath)
-		return c.exportNotebook(ctx, actualPath)
+		logging.Debugf("Read notebook via Export (SOURCE format) for path: %s", actualPath)
+		return c.exportNotebookSource(ctx, actualPath)
 	}
 
 	// Size-based API selection for regular files
@@ -385,7 +478,7 @@ func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]
 	if fileSize < sizeThresholdForSignedURL {
 		// Small files: use Export directly (1 round trip)
 		logging.Debugf("Read via Export (size %d < %d threshold) for path: %s", fileSize, sizeThresholdForSignedURL, actualPath)
-		return c.readViaExport(ctx, actualPath)
+		return c.exportNotebookSource(ctx, actualPath)
 	}
 
 	// Large files: try signed URL first
@@ -399,18 +492,7 @@ func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]
 	}
 
 	// Fallback: workspace.Export (for large files when signed URL fails or not available)
-	return c.readViaExport(ctx, actualPath)
-}
-
-func (c *WorkspaceFilesClient) readViaExport(ctx context.Context, filepath string) ([]byte, error) {
-	resp, err := c.workspaceClient.Export(ctx, workspace.ExportRequest{
-		Path:   filepath,
-		Format: workspace.ExportFormatSource,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return base64.StdEncoding.DecodeString(resp.Content)
+	return c.exportNotebookSource(ctx, actualPath)
 }
 
 func (c *WorkspaceFilesClient) writeViaNewFiles(ctx context.Context, filepath string, data []byte) error {
@@ -472,60 +554,101 @@ func (c *WorkspaceFilesClient) writeViaImportFile(ctx context.Context, filepath 
 	return c.apiClient.Do(ctx, http.MethodPost, urlPath, nil, nil, data, nil)
 }
 
-func (c *WorkspaceFilesClient) Write(ctx context.Context, filepath string, data []byte) error {
-	// Check if existing file is a notebook
-	info, err := c.Stat(ctx, filepath)
-	if err == nil {
-		wsInfo, ok := toWSFileInfo(info)
-		if ok && wsInfo.IsNotebook() {
-			logging.Debugf("Writing to notebook: %s", filepath)
-			return c.WriteNotebook(ctx, filepath, data)
-		}
+func detectNotebookLanguageFromSource(data []byte) workspace.Language {
+	// Only inspect the first line — no need to copy the entire slice.
+	end := bytes.IndexByte(data, '\n')
+	if end < 0 {
+		end = len(data)
 	}
+	firstLine := string(bytes.TrimSuffix(data[:end], []byte("\r")))
 
-	// New file with .ipynb extension should be created as a notebook
-	if pathutil.HasNotebookSuffix(filepath) {
-		logging.Debugf("Creating new notebook: %s", filepath)
-		return c.WriteNotebook(ctx, filepath, data)
+	switch {
+	case strings.HasPrefix(firstLine, "--"):
+		return workspace.LanguageSql
+	case strings.HasPrefix(firstLine, "//"):
+		return workspace.LanguageScala
+	case strings.HasPrefix(firstLine, "#"):
+		return workspace.LanguagePython
+	default:
+		return ""
 	}
+}
 
-	// Regular file handling
-	actualPath := pathutil.ToRemotePath(filepath)
+func normalizeNotebookLanguage(language workspace.Language, data []byte) workspace.Language {
+	if language != "" {
+		return language
+	}
+	if detected := detectNotebookLanguageFromSource(data); detected != "" {
+		return detected
+	}
+	return workspace.LanguagePython
+}
+
+func (c *WorkspaceFilesClient) writeRegularFile(ctx context.Context, actualPath string, data []byte) error {
 	c.cache.Invalidate(actualPath)
 
-	// Size-based API selection
 	if len(data) < sizeThresholdForSignedURL {
-		// Small files: use import-file directly (1 round trip)
 		logging.Debugf("Write via import-file (size %d < %d threshold) for path: %s", len(data), sizeThresholdForSignedURL, actualPath)
 		return c.writeViaImportFile(ctx, actualPath, data)
 	}
 
-	// Large files: try new-files + signed URL first
 	logging.Debugf("Write via new-files (size %d >= %d threshold) for path: %s", len(data), sizeThresholdForSignedURL, actualPath)
-	err = c.writeViaNewFiles(ctx, actualPath, data)
+	err := c.writeViaNewFiles(ctx, actualPath, data)
 	if err == nil {
 		return nil
 	}
 	logging.Debugf("Write via new-files failed for path: %s, falling back to import-file: %s", actualPath, sanitizeError(err))
 
-	// Fallback: import-file (for large files when new-files fails)
 	return c.writeViaImportFile(ctx, actualPath, data)
 }
 
-func (c *WorkspaceFilesClient) WriteNotebook(ctx context.Context, filePath string, data []byte) error {
-	actualPath := pathutil.ToRemotePath(filePath)
+func (c *WorkspaceFilesClient) writeNotebookSource(ctx context.Context, actualPath string, language workspace.Language, data []byte) error {
 	c.cache.Invalidate(actualPath)
+	return c.workspaceClient.Upload(
+		ctx,
+		actualPath,
+		bytes.NewReader(data),
+		workspace.UploadFormat(workspace.ImportFormatSource),
+		workspace.UploadLanguage(normalizeNotebookLanguage(language, data)),
+		workspace.UploadOverwrite(),
+	)
+}
 
-	return c.workspaceClient.Import(ctx, workspace.Import{
-		Path:      actualPath,
-		Content:   base64.StdEncoding.EncodeToString(data),
-		Format:    workspace.ImportFormatJupyter,
-		Overwrite: true,
-	})
+func (c *WorkspaceFilesClient) Write(ctx context.Context, filepath string, data []byte) error {
+	info, err := c.Stat(ctx, filepath)
+	if err == nil {
+		wsInfo, ok := toWSFileInfo(info)
+		if !ok {
+			return fmt.Errorf("unexpected file info type for %s", filepath)
+		}
+		if wsInfo.IsNotebook() {
+			logging.Debugf("Writing to notebook: %s", filepath)
+			return c.writeNotebookSource(ctx, wsInfo.Path, wsInfo.Language, data)
+		}
+		return c.writeRegularFile(ctx, wsInfo.Path, data)
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+
+	if actualPath, language, ok := pathutil.NotebookRemotePathFromSourcePath(filepath); ok {
+		logging.Debugf("Creating new notebook: %s", filepath)
+		return c.writeNotebookSource(ctx, actualPath, language, data)
+	}
+
+	return c.writeRegularFile(ctx, filepath, data)
 }
 
 func (c *WorkspaceFilesClient) Delete(ctx context.Context, filePath string, recursive bool) error {
-	actualPath := pathutil.ToRemotePath(filePath)
+	actualPath := filePath
+	info, err := c.Stat(ctx, filePath)
+	if err == nil {
+		if wsInfo, ok := toWSFileInfo(info); ok {
+			actualPath = wsInfo.Path
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
 	c.cache.Invalidate(actualPath)
 
 	return c.workspaceClient.Delete(ctx, workspace.Delete{
@@ -542,10 +665,64 @@ func (c *WorkspaceFilesClient) Mkdir(ctx context.Context, dirPath string) error 
 	})
 }
 
-func (c *WorkspaceFilesClient) Rename(ctx context.Context, source_path string, destination_path string) error {
-	actualSource := pathutil.ToRemotePath(source_path)
-	actualDest := pathutil.ToRemotePath(destination_path)
+type notebookRenameTarget struct {
+	path     string
+	language workspace.Language
+}
 
+func resolveNotebookRenameTarget(destinationPath string, currentLanguage workspace.Language) (notebookRenameTarget, error) {
+	if actualPath, language, ok := pathutil.NotebookRemotePathFromSourcePath(destinationPath); ok {
+		return notebookRenameTarget{path: actualPath, language: language}, nil
+	}
+	if actualPath, ok := pathutil.NotebookRemotePathFromFallbackPath(destinationPath); ok {
+		return notebookRenameTarget{path: actualPath, language: currentLanguage}, nil
+	}
+	return notebookRenameTarget{}, fmt.Errorf("notebook destination must use a supported extension (%s or %s)",
+		strings.Join(pathutil.AllNotebookSourceSuffixes(), ", "), pathutil.NotebookFallbackSuffix)
+}
+
+func replaceIfMatch(line, replacement string, candidates []string) string {
+	for _, candidate := range candidates {
+		if line == candidate {
+			return replacement
+		}
+	}
+	return line
+}
+
+func normalizeLineEndings(data []byte) string {
+	return strings.ReplaceAll(string(data), "\r\n", "\n")
+}
+
+func convertNotebookSourceLanguage(data []byte, language workspace.Language) []byte {
+	source := normalizeLineEndings(data)
+	hadTrailingNewline := strings.HasSuffix(source, "\n")
+	if hadTrailingNewline {
+		source = strings.TrimSuffix(source, "\n")
+	}
+	if source == "" {
+		return data
+	}
+
+	lines := strings.Split(source, "\n")
+	headers := pathutil.AllNotebookSourceHeaders()
+	delimiters := pathutil.AllNotebookCellDelimiters()
+	for i, line := range lines {
+		if i == 0 {
+			lines[i] = replaceIfMatch(line, pathutil.NotebookSourceHeader(language), headers)
+			continue
+		}
+		lines[i] = replaceIfMatch(line, pathutil.NotebookCellDelimiter(language), delimiters)
+	}
+
+	converted := strings.Join(lines, "\n")
+	if hadTrailingNewline {
+		converted += "\n"
+	}
+	return []byte(converted)
+}
+
+func (c *WorkspaceFilesClient) renameExactPath(ctx context.Context, actualSource string, actualDest string) error {
 	urlPath := "/api/2.0/workspace/rename"
 
 	reqBody := map[string]any{
@@ -553,14 +730,70 @@ func (c *WorkspaceFilesClient) Rename(ctx context.Context, source_path string, d
 		"destination_path": actualDest,
 	}
 
-	err := c.apiClient.Do(ctx, http.MethodPost, urlPath, nil, nil, reqBody, nil)
-	if err != nil {
+	if err := c.apiClient.Do(ctx, http.MethodPost, urlPath, nil, nil, reqBody, nil); err != nil {
 		return err
 	}
 
 	c.cache.Invalidate(actualSource)
 	c.cache.Invalidate(actualDest)
 	return nil
+}
+
+func (c *WorkspaceFilesClient) renameNotebook(ctx context.Context, sourceInfo WSFileInfo, destinationPath string) error {
+	target, err := resolveNotebookRenameTarget(destinationPath, sourceInfo.Language)
+	if err != nil {
+		return err
+	}
+
+	if target.path == sourceInfo.Path && target.language == sourceInfo.Language {
+		return nil
+	}
+
+	if target.language == sourceInfo.Language {
+		return c.renameExactPath(ctx, sourceInfo.Path, target.path)
+	}
+
+	data, err := c.exportNotebookSource(ctx, sourceInfo.Path)
+	if err != nil {
+		return err
+	}
+
+	converted := convertNotebookSourceLanguage(data, target.language)
+	if err := c.writeNotebookSource(ctx, target.path, target.language, converted); err != nil {
+		return err
+	}
+
+	if target.path == sourceInfo.Path {
+		c.cache.Invalidate(sourceInfo.Path)
+		return nil
+	}
+
+	if err := c.workspaceClient.Delete(ctx, workspace.Delete{
+		Path:      sourceInfo.Path,
+		Recursive: false,
+	}); err != nil {
+		return err
+	}
+
+	c.cache.Invalidate(sourceInfo.Path)
+	c.cache.Invalidate(target.path)
+	return nil
+}
+
+func (c *WorkspaceFilesClient) Rename(ctx context.Context, source_path string, destination_path string) error {
+	info, err := c.Stat(ctx, source_path)
+	if err != nil {
+		return err
+	}
+
+	wsInfo, ok := toWSFileInfo(info)
+	if !ok {
+		return fmt.Errorf("unexpected file info type for %s", source_path)
+	}
+	if wsInfo.IsNotebook() {
+		return c.renameNotebook(ctx, wsInfo, destination_path)
+	}
+	return c.renameExactPath(ctx, wsInfo.Path, destination_path)
 }
 
 // Helpers

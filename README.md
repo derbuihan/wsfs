@@ -12,10 +12,12 @@ A FUSE-based file system to interact with Databricks workspace files and directo
 - [x] Delete files and directories.
 - [x] Support for filesystem operations (`Rename`, `Fsync` and `Setattr`).
 - [x] Disk-based file caching with TTL and LRU eviction for faster access.
+- [x] Expose Databricks notebooks as source files (`.py`, `.sql`, `.scala`, `.R`) based on notebook language.
 
 Notes:
 - `Setattr` currently supports size changes (truncate) and mtime updates. atime-only updates return ENOTSUP. chmod/chown also return ENOTSUP.
 - Vim saves are verified in the test suite.
+- Notebooks are shown as source files by default. `.ipynb` appears only as a fallback when the preferred source name collides with an exact workspace entry or when notebook language is unknown.
 
 ## Current behavior & limitations
 
@@ -24,6 +26,7 @@ Notes:
 - `Open` with write/truncate uses direct I/O; reads use the in-memory buffer after first fetch.
 - `Flush/Fsync/Release` write back dirty buffers; `Release` also drops the in-memory buffer.
 - atime-only updates are ENOTSUP; chmod/chown are ENOTSUP.
+- Creating `foo.py` creates a Python notebook named `foo` in Databricks. Creating `foo.ipynb` creates a regular workspace file named `foo.ipynb`.
 
 Behavior details: see `docs/behavior.md`.
 
@@ -52,6 +55,9 @@ $ ./wsfs <mount-point>
 $ cd <mount-point>
 $ ls
 Repos  Shared  Users
+
+$ ls Users/user@example.com
+analysis.py  dashboard.sql  regular-file.txt
 ```
 
 ## Debian/Ubuntu (.deb)

@@ -127,7 +127,7 @@ if [ "$RUN_MAIN" = true ]; then
 
     # Build wsfs
     echo 'Building wsfs...'
-    go build -o /tmp/wsfs ./cmd/wsfs
+    go build -buildvcs=false -o /tmp/wsfs ./cmd/wsfs
 
     # Set up directories
     mkdir -p /mnt/wsfs /tmp/wsfs-cache
@@ -180,7 +180,7 @@ if [ "$RUN_SECURITY" = true ]; then
 
     # Build wsfs (if not already built)
     if [ ! -x /tmp/wsfs ]; then
-      go build -o /tmp/wsfs ./cmd/wsfs
+      go build -buildvcs=false -o /tmp/wsfs ./cmd/wsfs
     fi
 
     # Set up directories
@@ -234,7 +234,7 @@ if [ "$RUN_CONFIG" = true ]; then
 
     # Build wsfs (if not already built)
     if [ ! -x /tmp/wsfs ]; then
-      go build -o /tmp/wsfs ./cmd/wsfs
+      go build -buildvcs=false -o /tmp/wsfs ./cmd/wsfs
     fi
 
     # Run cache configuration tests

@@ -14,7 +14,6 @@ import (
 
 	"wsfs/internal/databricks"
 	"wsfs/internal/logging"
-	"wsfs/internal/pathutil"
 )
 
 func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
@@ -188,8 +187,7 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 				n.fileInfo = wsInfo
 				// Also invalidate disk cache
 				if n.diskCache != nil && !n.diskCache.IsDisabled() {
-					actualPath := pathutil.ToRemotePath(n.fileInfo.Path)
-					n.diskCache.Delete(actualPath)
+					n.diskCache.Delete(n.fileInfo.Path)
 				}
 			}
 		}
@@ -199,9 +197,8 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 		// Invalidate caches immediately for truncation
 		n.wfClient.CacheInvalidate(n.Path())
 		if n.diskCache != nil && !n.diskCache.IsDisabled() {
-			actualPath := pathutil.ToRemotePath(n.fileInfo.Path)
-			if err := n.diskCache.Delete(actualPath); err != nil {
-				logging.Debugf("Failed to delete cache for %s: %v", actualPath, err)
+			if err := n.diskCache.Delete(n.fileInfo.Path); err != nil {
+				logging.Debugf("Failed to delete cache for %s: %v", n.fileInfo.Path, err)
 			}
 		}
 
@@ -224,7 +221,7 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 
 	n.incrementOpenLocked()
 
-	return nil, openFlags, 0
+	return &wsFileHandle{}, openFlags, 0
 }
 
 func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
@@ -357,6 +354,11 @@ func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off i
 	if n.buf.Data == nil {
 		n.buf.Data = []byte{}
 	}
+	if n.buf.ReplaceOnFirstWrite && off == 0 {
+		n.buf.Data = []byte{}
+		n.buf.CachedPath = ""
+		n.buf.FileSize = 0
+	}
 
 	end := off + int64(len(data))
 	if int64(len(n.buf.Data)) < end {
@@ -365,6 +367,7 @@ func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off i
 		n.buf.Data = newData
 	}
 	copy(n.buf.Data[off:], data)
+	n.buf.ReplaceOnFirstWrite = false
 
 	n.fileInfo.ObjectInfo.Size = int64(len(n.buf.Data))
 	n.markModifiedLocked(time.Now())

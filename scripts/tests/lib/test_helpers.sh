@@ -173,7 +173,7 @@ assert_contains() {
   local needle="$2"
   local description="$3"
 
-  if echo "$haystack" | grep -q "$needle"; then
+  if echo "$haystack" | grep -q -- "$needle"; then
     echo -e "${GREEN}✓ PASS:${NC} $description"
     ((TEST_PASSED++)) || true
     return 0

@@ -179,8 +179,8 @@ func TestWSNodeCreateFile(t *testing.T) {
 	if errno != 0 || child == nil {
 		t.Fatalf("Create failed: errno=%d child=%v", errno, child)
 	}
-	if fh != nil {
-		t.Fatalf("expected nil file handle, got %v", fh)
+	if fh == nil {
+		t.Fatalf("expected non-nil file handle, got nil")
 	}
 	if flags != fuse.FOPEN_KEEP_CACHE {
 		t.Fatalf("unexpected flags: %d", flags)
@@ -206,12 +206,46 @@ func TestWSNodeCreateNotebook(t *testing.T) {
 	}
 	root := newTestRootNode(t, api)
 	out := &fuse.EntryOut{}
-	child, _, _, errno := root.Create(context.Background(), "note.ipynb", 0, 0644, out)
+	child, _, _, errno := root.Create(context.Background(), "note.py", 0, 0644, out)
 	if errno != 0 || child == nil {
 		t.Fatalf("Create failed: errno=%d child=%v", errno, child)
 	}
-	if string(wroteData) != `{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":4}` {
+	if string(wroteData) != "# Databricks notebook source\n" {
 		t.Fatalf("unexpected notebook content: %q", string(wroteData))
+	}
+}
+
+func TestWSNodeCreateNotebookFirstWriteReplacesScaffold(t *testing.T) {
+	api := &databricks.FakeWorkspaceAPI{
+		WriteFunc: func(ctx context.Context, filepath string, data []byte) error {
+			return nil
+		},
+		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			return databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+				ObjectType: workspace.ObjectTypeNotebook,
+				Path:       "/note",
+				Language:   workspace.LanguagePython,
+			}}, nil
+		},
+	}
+
+	root := newTestRootNode(t, api)
+	out := &fuse.EntryOut{}
+	child, _, _, errno := root.Create(context.Background(), "note.py", 0, 0644, out)
+	if errno != 0 || child == nil {
+		t.Fatalf("Create failed: errno=%d child=%v", errno, child)
+	}
+
+	node, ok := child.Operations().(*WSNode)
+	if !ok {
+		t.Fatalf("expected WSNode child, got %T", child.Operations())
+	}
+
+	if _, errno := node.Write(context.Background(), nil, []byte("print('hello')\n"), 0); errno != 0 {
+		t.Fatalf("Write failed: %d", errno)
+	}
+	if got := string(node.buf.Data); got != "print('hello')\n" {
+		t.Fatalf("unexpected buffered content after first write: %q", got)
 	}
 }
 
@@ -280,7 +314,11 @@ func TestWSNodeUnlinkRemovesCache(t *testing.T) {
 	var deletedPath string
 	api := &databricks.FakeWorkspaceAPI{
 		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
-			return databricks.NewTestFileInfo(filePath, 0, false), nil
+			return databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+				Path:       "/dir/note",
+				ObjectType: workspace.ObjectTypeNotebook,
+				Language:   workspace.LanguagePython,
+			}}, nil
 		},
 		DeleteFunc: func(ctx context.Context, filePath string, recursive bool) error {
 			deletedPath = filePath
@@ -293,11 +331,11 @@ func TestWSNodeUnlinkRemovesCache(t *testing.T) {
 		fileInfo:  databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{ObjectType: workspace.ObjectTypeDirectory, Path: "/dir"}},
 	}
 
-	errno := root.Unlink(context.Background(), "note.ipynb")
+	errno := root.Unlink(context.Background(), "note.py")
 	if errno != 0 {
 		t.Fatalf("Unlink failed: %d", errno)
 	}
-	if deletedPath != "/dir/note.ipynb" {
+	if deletedPath != "/dir/note.py" {
 		t.Fatalf("unexpected delete path: %s", deletedPath)
 	}
 	_, _, found := cache.Get(remotePath, modTime)
@@ -353,6 +391,16 @@ func TestWSNodeRenameInvalidParent(t *testing.T) {
 func TestWSNodeRenameRemovesCache(t *testing.T) {
 	ctx := context.Background()
 	api := &databricks.FakeWorkspaceAPI{
+		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			if filePath == "/file.py" {
+				return databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+					Path:       "/file",
+					ObjectType: workspace.ObjectTypeNotebook,
+					Language:   workspace.LanguagePython,
+				}}, nil
+			}
+			return databricks.NewTestFileInfo(filePath, 0, false), nil
+		},
 		RenameFunc: func(ctx context.Context, sourcePath string, destinationPath string) error {
 			return nil
 		},
@@ -375,7 +423,7 @@ func TestWSNodeRenameRemovesCache(t *testing.T) {
 		t.Fatalf("cache set: %v", err)
 	}
 
-	errno := root.Rename(ctx, "file.ipynb", destNode, "renamed.ipynb", 0)
+	errno := root.Rename(ctx, "file.py", destNode, "renamed.py", 0)
 	if errno != 0 {
 		t.Fatalf("Rename failed: %d", errno)
 	}

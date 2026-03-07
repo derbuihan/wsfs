@@ -26,6 +26,10 @@
 
 - [x] Notebook (.ipynb) のサイズ不整合で読み込みが途中で切れる問題（Exportサイズ反映、テスト）
 
+## 完了（2026-03-07）
+
+- [x] Notebook を source 表示に変更（言語別拡張子、SOURCE import/export、衝突時 `.ipynb` フォールバック、rename/テスト更新）
+
 ---
 
 ## 未対応（オプション）

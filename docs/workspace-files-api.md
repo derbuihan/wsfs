@@ -41,8 +41,8 @@ These use the official Databricks Go SDK and are well-documented:
 
 | SDK Method | Purpose | wsfs Usage |
 |------------|---------|------------|
-| `workspace.Export` | Export notebooks/files | Read notebooks (JUPYTER format) |
-| `workspace.Import` | Import notebooks | Write notebooks |
+| `workspace.Export` | Export notebooks/files | Read notebooks (SOURCE format) |
+| `workspace.Import` | Import notebooks | Write notebooks (SOURCE format + language) |
 | `workspace.Delete` | Delete files/directories | Unlink, Rmdir |
 | `workspace.Mkdirs` | Create directories | Mkdir |
 

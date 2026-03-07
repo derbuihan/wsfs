@@ -59,7 +59,12 @@ type fileBuffer struct {
 	Dirty      bool
 	CachedPath string // Path to cached file for on-demand reading
 	FileSize   int64  // File size for cached file reads
+	// ReplaceOnFirstWrite is used for notebook scaffolds created by Create().
+	// The first user write at offset 0 replaces the scaffold instead of overlaying it.
+	ReplaceOnFirstWrite bool
 }
+
+type wsFileHandle struct{}
 
 // NodeConfig holds configuration for access control.
 type NodeConfig struct {

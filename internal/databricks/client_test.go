@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/databricks/databricks-sdk-go/apierr"
 	"github.com/databricks/databricks-sdk-go/service/workspace"
 
 	"wsfs/internal/metacache"
@@ -97,6 +100,23 @@ func TestStatNotFound(t *testing.T) {
 	}
 	if callCount != 1 {
 		t.Errorf("Expected 1 API call (cached error), got %d", callCount)
+	}
+}
+
+func TestStatNotFoundNormalizesDatabricksMissing(t *testing.T) {
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			return apierr.ErrResourceDoesNotExist
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, nil)
+
+	_, err := client.Stat(context.Background(), "/nonexistent.txt")
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("expected fs.ErrNotExist, got %v", err)
 	}
 }
 
@@ -330,6 +350,9 @@ func TestWriteViaNewFiles(t *testing.T) {
 		DoFunc: func(ctx context.Context, method, path string,
 			headers map[string]string, queryParams map[string]any, request, response any,
 			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info") {
+				return fs.ErrNotExist
+			}
 			if strings.Contains(path, "new-files") {
 				resp := response.(*struct {
 					SignedURLs []struct {
@@ -377,6 +400,9 @@ func TestWriteFallbackToImportFile(t *testing.T) {
 		DoFunc: func(ctx context.Context, method, path string,
 			headers map[string]string, queryParams map[string]any, request, response any,
 			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info") {
+				return fs.ErrNotExist
+			}
 			if strings.Contains(path, "new-files") {
 				return fmt.Errorf("new-files API error")
 			}
@@ -410,6 +436,9 @@ func TestWriteSmallFilesUseImportFile(t *testing.T) {
 		DoFunc: func(ctx context.Context, method, path string,
 			headers map[string]string, queryParams map[string]any, request, response any,
 			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info") {
+				return fs.ErrNotExist
+			}
 			if strings.Contains(path, "new-files") {
 				newFilesCalled = true
 				return fmt.Errorf("new-files should not be called for small files")
@@ -984,7 +1013,7 @@ func BenchmarkJSONEncoding(b *testing.B) {
 }
 
 // ============================================================================
-// Notebook (.ipynb) Tests
+// Notebook Source Display Tests
 // ============================================================================
 
 // TestIsNotebook verifies IsNotebook returns correct values for different ObjectTypes
@@ -1010,31 +1039,31 @@ func TestIsNotebook(t *testing.T) {
 	}
 }
 
-// TestStatWithIpynbSuffix verifies that Stat handles .ipynb suffix correctly
-func TestStatWithIpynbSuffix(t *testing.T) {
-	notebookContent := `{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":4}`
+func TestStatNotebookSourceAlias(t *testing.T) {
+	notebookContent := "# Databricks notebook source\nprint('hello')\n"
 	exportCalled := false
 	exportPath := ""
-	exportFormat := workspace.ExportFormatSource
+	exportFormat := workspace.ExportFormatAuto
 
 	mockAPI := &MockAPIClient{
 		DoFunc: func(ctx context.Context, method, path string,
 			headers map[string]string, queryParams map[string]any, request, response any,
 			visitors ...func(*http.Request) error) error {
-			if strings.Contains(path, "object-info") {
-				// Return notebook info for the base path (without .ipynb)
-				if strings.Contains(path, "notebook") && !strings.Contains(path, ".ipynb") {
-					resp := response.(*objectInfoResponse)
-					resp.WsfsObjectInfo = wsfsObjectInfo{
-						ObjectInfo: workspace.ObjectInfo{
-							Path:       "/test/notebook",
-							ObjectType: workspace.ObjectTypeNotebook,
-							Size:       100,
-							ModifiedAt: time.Now().UnixMilli(),
-						},
-					}
-					return nil
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fnotebook.py") {
+				return fs.ErrNotExist
+			}
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fnotebook") {
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/notebook",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						Size:       1,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
 				}
+				return nil
 			}
 			return fs.ErrNotExist
 		},
@@ -1053,43 +1082,39 @@ func TestStatWithIpynbSuffix(t *testing.T) {
 
 	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, nil)
 
-	// Test 1: Stat with .ipynb suffix should find the notebook
-	info, err := client.Stat(context.Background(), "/test/notebook.ipynb")
+	info, err := client.Stat(context.Background(), "/test/notebook.py")
 	if err != nil {
-		t.Fatalf("Stat with .ipynb suffix failed: %v", err)
+		t.Fatalf("Stat failed: %v", err)
 	}
 	wsInfo := info.(WSFileInfo)
 	if !wsInfo.IsNotebook() {
-		t.Error("Expected IsNotebook() to be true")
+		t.Fatal("expected notebook info")
 	}
 	if wsInfo.Path != "/test/notebook" {
-		t.Errorf("Expected path /test/notebook, got %s", wsInfo.Path)
+		t.Fatalf("unexpected path: %s", wsInfo.Path)
+	}
+	if wsInfo.Language != workspace.LanguagePython {
+		t.Fatalf("unexpected language: %s", wsInfo.Language)
 	}
 	if wsInfo.Size() != int64(len(notebookContent)) {
-		t.Errorf("Expected notebook size %d, got %d", len(notebookContent), wsInfo.Size())
+		t.Fatalf("expected size %d, got %d", len(notebookContent), wsInfo.Size())
 	}
 	if !wsInfo.NotebookSizeComputed {
-		t.Error("Expected notebook size to be computed")
+		t.Fatal("expected computed notebook size")
 	}
 	if !exportCalled {
-		t.Error("Expected Export to be called for notebook size")
+		t.Fatal("expected notebook export for size computation")
 	}
-	if exportFormat != workspace.ExportFormatJupyter {
-		t.Errorf("Expected JUPYTER format, got %v", exportFormat)
+	if exportFormat != workspace.ExportFormatSource {
+		t.Fatalf("expected SOURCE export, got %v", exportFormat)
 	}
 	if exportPath != "/test/notebook" {
-		t.Errorf("Expected Export path /test/notebook, got %s", exportPath)
-	}
-
-	// Test 2: Stat with .ipynb suffix for non-notebook should fail
-	_, err = client.Stat(context.Background(), "/test/file.ipynb")
-	if err == nil {
-		t.Error("Expected error for .ipynb suffix on non-existent notebook")
+		t.Fatalf("unexpected export path: %s", exportPath)
 	}
 }
 
 func TestStatNotebookSizeUsesExportWhenCached(t *testing.T) {
-	notebookContent := `{"cells":[{"cell_type":"markdown","source":["hello"]}],"metadata":{},"nbformat":4,"nbformat_minor":4}`
+	notebookContent := "# Databricks notebook source\nprint('cached')\n"
 	exportCalled := false
 	apiCalled := false
 
@@ -1116,8 +1141,8 @@ func TestStatNotebookSizeUsesExportWhenCached(t *testing.T) {
 	mockWorkspace := &MockWorkspaceClient{
 		ExportFunc: func(ctx context.Context, req workspace.ExportRequest) (*workspace.ExportResponse, error) {
 			exportCalled = true
-			if req.Format != workspace.ExportFormatJupyter {
-				t.Fatalf("expected JUPYTER format, got %v", req.Format)
+			if req.Format != workspace.ExportFormatSource {
+				t.Fatalf("expected SOURCE format, got %v", req.Format)
 			}
 			if req.Path != "/test/cached_notebook" {
 				t.Fatalf("expected export path /test/cached_notebook, got %s", req.Path)
@@ -1164,22 +1189,108 @@ func TestStatNotebookSizeUsesExportWhenCached(t *testing.T) {
 	}
 }
 
-// TestReadAllNotebook verifies that ReadAll exports notebooks in JUPYTER format
+func TestStatNotebookFallbackAliasRequiresCollision(t *testing.T) {
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fnote.ipynb") {
+				return fs.ErrNotExist
+			}
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fnote.py") {
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/note.py",
+						ObjectType: workspace.ObjectTypeFile,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				}
+				return nil
+			}
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fnote") {
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/note",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				}
+				return nil
+			}
+			return fs.ErrNotExist
+		},
+	}
+
+	mockWorkspace := &MockWorkspaceClient{
+		ExportFunc: func(ctx context.Context, req workspace.ExportRequest) (*workspace.ExportResponse, error) {
+			return &workspace.ExportResponse{
+				Content: base64.StdEncoding.EncodeToString([]byte("# Databricks notebook source\nprint(1)\n")),
+			}, nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, nil)
+
+	info, err := client.Stat(context.Background(), "/test/note.ipynb")
+	if err != nil {
+		t.Fatalf("Stat fallback alias failed: %v", err)
+	}
+	wsInfo := info.(WSFileInfo)
+	if wsInfo.Path != "/test/note" {
+		t.Fatalf("unexpected notebook path: %s", wsInfo.Path)
+	}
+
+	clientNoCollision := NewWorkspaceFilesClientWithDeps(mockWorkspace, &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fplain.ipynb") || strings.Contains(path, "object-info?path=%2Ftest%2Fplain.py") {
+				return fs.ErrNotExist
+			}
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fplain") {
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/plain",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				}
+				return nil
+			}
+			return fs.ErrNotExist
+		},
+	}, nil)
+
+	if _, err := clientNoCollision.Stat(context.Background(), "/test/plain.ipynb"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("expected fallback alias to stay hidden without collision, got %v", err)
+	}
+}
+
+// TestReadAllNotebook verifies that ReadAll exports notebooks in SOURCE format
 func TestReadAllNotebook(t *testing.T) {
-	notebookContent := `{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":4}`
+	notebookContent := "# Databricks notebook source\nprint('hello')\n"
 	exportCalled := false
-	exportFormat := workspace.ExportFormatSource
+	exportFormat := workspace.ExportFormatAuto
 
 	mockAPI := &MockAPIClient{
 		DoFunc: func(ctx context.Context, method, path string,
 			headers map[string]string, queryParams map[string]any, request, response any,
 			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fnotebook.py") {
+				return fs.ErrNotExist
+			}
 			if strings.Contains(path, "object-info") {
 				resp := response.(*objectInfoResponse)
 				resp.WsfsObjectInfo = wsfsObjectInfo{
 					ObjectInfo: workspace.ObjectInfo{
 						Path:       "/test/notebook",
 						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
 						Size:       int64(len(notebookContent)),
 						ModifiedAt: time.Now().UnixMilli(),
 					},
@@ -1202,7 +1313,7 @@ func TestReadAllNotebook(t *testing.T) {
 
 	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, nil)
 
-	data, err := client.ReadAll(context.Background(), "/test/notebook.ipynb")
+	data, err := client.ReadAll(context.Background(), "/test/notebook.py")
 	if err != nil {
 		t.Fatalf("ReadAll failed: %v", err)
 	}
@@ -1210,85 +1321,61 @@ func TestReadAllNotebook(t *testing.T) {
 	if !exportCalled {
 		t.Error("Expected Export to be called for notebook")
 	}
-	if exportFormat != workspace.ExportFormatJupyter {
-		t.Errorf("Expected JUPYTER format, got %v", exportFormat)
+	if exportFormat != workspace.ExportFormatSource {
+		t.Errorf("Expected SOURCE format, got %v", exportFormat)
 	}
 	if string(data) != notebookContent {
 		t.Errorf("Expected %q, got %q", notebookContent, string(data))
 	}
 }
 
-// TestWriteNotebook verifies that Write uses Import API with JUPYTER format for notebooks
-func TestWriteNotebook(t *testing.T) {
-	notebookContent := `{"cells":[{"cell_type":"code","source":["print('hello')"]}],"metadata":{},"nbformat":4,"nbformat_minor":4}`
-	importCalled := false
-	var importedPath string
-	var importedFormat workspace.ImportFormat
+func TestWriteNewNotebookIgnoresDatabricksMissingAliasProbe(t *testing.T) {
+	var uploadCalled bool
+	var uploadedPath string
+	var uploadedLanguage workspace.Language
 
 	mockAPI := &MockAPIClient{
 		DoFunc: func(ctx context.Context, method, path string,
 			headers map[string]string, queryParams map[string]any, request, response any,
 			visitors ...func(*http.Request) error) error {
 			if strings.Contains(path, "object-info") {
-				// Return notebook for existing path
-				if strings.Contains(path, "existing_notebook") {
-					resp := response.(*objectInfoResponse)
-					resp.WsfsObjectInfo = wsfsObjectInfo{
-						ObjectInfo: workspace.ObjectInfo{
-							Path:       "/test/existing_notebook",
-							ObjectType: workspace.ObjectTypeNotebook,
-							Size:       100,
-							ModifiedAt: time.Now().UnixMilli(),
-						},
-					}
-					return nil
-				}
+				return apierr.ErrResourceDoesNotExist
 			}
-			return fs.ErrNotExist
+			return fmt.Errorf("unexpected path: %s", path)
 		},
 	}
 
 	mockWorkspace := &MockWorkspaceClient{
-		ImportFunc: func(ctx context.Context, req workspace.Import) error {
-			importCalled = true
-			importedPath = req.Path
-			importedFormat = req.Format
+		UploadFunc: func(ctx context.Context, path string, r io.Reader, opts ...workspace.UploadOption) error {
+			uploadCalled = true
+			req := workspace.Import{Path: path}
+			for _, opt := range opts {
+				opt(&req)
+			}
+			uploadedPath = req.Path
+			uploadedLanguage = req.Language
 			return nil
 		},
 	}
 
 	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, nil)
 
-	// Test 1: Write to existing notebook
-	err := client.Write(context.Background(), "/test/existing_notebook.ipynb", []byte(notebookContent))
+	err := client.Write(context.Background(), "/test/new_notebook.py", []byte("# Databricks notebook source\n"))
 	if err != nil {
-		t.Fatalf("Write to existing notebook failed: %v", err)
+		t.Fatalf("Write new notebook failed: %v", err)
 	}
-	if !importCalled {
-		t.Error("Expected Import to be called for notebook")
+	if !uploadCalled {
+		t.Fatal("expected Upload to be called")
 	}
-	if importedFormat != workspace.ImportFormatJupyter {
-		t.Errorf("Expected JUPYTER format, got %v", importedFormat)
+	if uploadedPath != "/test/new_notebook" {
+		t.Fatalf("expected notebook path without suffix, got %s", uploadedPath)
 	}
-	if importedPath != "/test/existing_notebook" {
-		t.Errorf("Expected path without .ipynb suffix, got %s", importedPath)
-	}
-
-	// Test 2: Write new .ipynb file (should create as notebook)
-	importCalled = false
-	err = client.Write(context.Background(), "/test/new_notebook.ipynb", []byte(notebookContent))
-	if err != nil {
-		t.Fatalf("Write new .ipynb failed: %v", err)
-	}
-	if !importCalled {
-		t.Error("Expected Import to be called for new .ipynb file")
-	}
-	if importedPath != "/test/new_notebook" {
-		t.Errorf("Expected path without .ipynb suffix, got %s", importedPath)
+	if uploadedLanguage != workspace.LanguagePython {
+		t.Fatalf("expected PYTHON language, got %v", uploadedLanguage)
 	}
 }
 
-// TestDeleteNotebook verifies that Delete strips .ipynb suffix
+// TestDeleteNotebook verifies that Delete resolves notebook aliases to the remote path
 func TestDeleteNotebook(t *testing.T) {
 	var deletedPath string
 
@@ -1299,25 +1386,62 @@ func TestDeleteNotebook(t *testing.T) {
 		},
 	}
 
-	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, &MockAPIClient{}, nil)
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fnotebook.py") {
+				return fs.ErrNotExist
+			}
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fnotebook") {
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/notebook",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				}
+				return nil
+			}
+			return fs.ErrNotExist
+		},
+	}
 
-	err := client.Delete(context.Background(), "/test/notebook.ipynb", false)
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, nil)
+
+	err := client.Delete(context.Background(), "/test/notebook.py", false)
 	if err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}
 	if deletedPath != "/test/notebook" {
-		t.Errorf("Expected path without .ipynb suffix, got %s", deletedPath)
+		t.Errorf("Expected remote notebook path, got %s", deletedPath)
 	}
 }
 
-// TestRenameNotebook verifies that Rename strips .ipynb suffix from both paths
-func TestRenameNotebook(t *testing.T) {
+func TestRenameNotebookSameLanguage(t *testing.T) {
 	var sourcePathUsed, destPathUsed string
 
 	mockAPI := &MockAPIClient{
 		DoFunc: func(ctx context.Context, method, path string,
 			headers map[string]string, queryParams map[string]any, request, response any,
 			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fold.py") {
+				return fs.ErrNotExist
+			}
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fold") {
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/old",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				}
+				return nil
+			}
 			if strings.Contains(path, "rename") {
 				reqMap := request.(map[string]any)
 				sourcePathUsed = reqMap["source_path"].(string)
@@ -1330,15 +1454,296 @@ func TestRenameNotebook(t *testing.T) {
 
 	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, nil)
 
-	err := client.Rename(context.Background(), "/test/old.ipynb", "/test/new.ipynb")
+	err := client.Rename(context.Background(), "/test/old.py", "/test/new.py")
 	if err != nil {
 		t.Fatalf("Rename failed: %v", err)
 	}
 	if sourcePathUsed != "/test/old" {
-		t.Errorf("Expected source path without .ipynb, got %s", sourcePathUsed)
+		t.Errorf("Expected source notebook path, got %s", sourcePathUsed)
 	}
 	if destPathUsed != "/test/new" {
-		t.Errorf("Expected dest path without .ipynb, got %s", destPathUsed)
+		t.Errorf("Expected dest notebook path, got %s", destPathUsed)
+	}
+}
+
+func TestRenameNotebookCrossLanguage(t *testing.T) {
+	var imported workspace.Import
+	var deletedPath string
+	renameCalled := false
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fold.py") {
+				return fs.ErrNotExist
+			}
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fold") {
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/old",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				}
+				return nil
+			}
+			if strings.Contains(path, "rename") {
+				renameCalled = true
+				return nil
+			}
+			return fs.ErrNotExist
+		},
+	}
+
+	mockWorkspace := &MockWorkspaceClient{
+		ExportFunc: func(ctx context.Context, req workspace.ExportRequest) (*workspace.ExportResponse, error) {
+			if req.Path != "/test/old" {
+				t.Fatalf("unexpected export path: %s", req.Path)
+			}
+			if req.Format != workspace.ExportFormatSource {
+				t.Fatalf("expected SOURCE export, got %v", req.Format)
+			}
+			content := "# Databricks notebook source\nprint('hello')\n# COMMAND ----------\nprint('again')\n"
+			return &workspace.ExportResponse{
+				Content: base64.StdEncoding.EncodeToString([]byte(content)),
+			}, nil
+		},
+		UploadFunc: func(ctx context.Context, path string, r io.Reader, opts ...workspace.UploadOption) error {
+			body, err := io.ReadAll(r)
+			if err != nil {
+				return err
+			}
+			imported = workspace.Import{
+				Path:    path,
+				Content: base64.StdEncoding.EncodeToString(body),
+			}
+			for _, opt := range opts {
+				opt(&imported)
+			}
+			return nil
+		},
+		DeleteFunc: func(ctx context.Context, req workspace.Delete) error {
+			deletedPath = req.Path
+			return nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, nil)
+
+	err := client.Rename(context.Background(), "/test/old.py", "/test/new.sql")
+	if err != nil {
+		t.Fatalf("Rename failed: %v", err)
+	}
+	if renameCalled {
+		t.Fatal("did not expect rename API for cross-language notebook rename")
+	}
+	if imported.Path != "/test/new" {
+		t.Fatalf("unexpected import path: %s", imported.Path)
+	}
+	if imported.Format != workspace.ImportFormatSource {
+		t.Fatalf("expected SOURCE import, got %v", imported.Format)
+	}
+	if imported.Language != workspace.LanguageSql {
+		t.Fatalf("expected SQL language, got %v", imported.Language)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(imported.Content)
+	if err != nil {
+		t.Fatalf("decode imported content: %v", err)
+	}
+	expected := "-- Databricks notebook source\nprint('hello')\n-- COMMAND ----------\nprint('again')\n"
+	if string(decoded) != expected {
+		t.Fatalf("unexpected converted source:\n%s", string(decoded))
+	}
+	if deletedPath != "/test/old" {
+		t.Fatalf("unexpected delete path: %s", deletedPath)
+	}
+}
+
+func TestRenameNotebookCrossLanguageSameRemotePath(t *testing.T) {
+	var imported workspace.Import
+	deleteCalled := false
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fold.py") {
+				return fs.ErrNotExist
+			}
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fold") {
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/old",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				}
+				return nil
+			}
+			return fs.ErrNotExist
+		},
+	}
+
+	mockWorkspace := &MockWorkspaceClient{
+		ExportFunc: func(ctx context.Context, req workspace.ExportRequest) (*workspace.ExportResponse, error) {
+			content := "# Databricks notebook source\nprint('hello')\n# COMMAND ----------\nprint('again')\n"
+			return &workspace.ExportResponse{
+				Content: base64.StdEncoding.EncodeToString([]byte(content)),
+			}, nil
+		},
+		UploadFunc: func(ctx context.Context, path string, r io.Reader, opts ...workspace.UploadOption) error {
+			body, err := io.ReadAll(r)
+			if err != nil {
+				return err
+			}
+			imported = workspace.Import{
+				Path:    path,
+				Content: base64.StdEncoding.EncodeToString(body),
+			}
+			for _, opt := range opts {
+				opt(&imported)
+			}
+			return nil
+		},
+		DeleteFunc: func(ctx context.Context, req workspace.Delete) error {
+			deleteCalled = true
+			return nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, nil)
+
+	err := client.Rename(context.Background(), "/test/old.py", "/test/old.sql")
+	if err != nil {
+		t.Fatalf("Rename failed: %v", err)
+	}
+	if deleteCalled {
+		t.Fatal("did not expect delete when only notebook language changes")
+	}
+	if imported.Path != "/test/old" {
+		t.Fatalf("unexpected import path: %s", imported.Path)
+	}
+	if imported.Language != workspace.LanguageSql {
+		t.Fatalf("expected SQL language, got %v", imported.Language)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(imported.Content)
+	if err != nil {
+		t.Fatalf("decode imported content: %v", err)
+	}
+	expected := "-- Databricks notebook source\nprint('hello')\n-- COMMAND ----------\nprint('again')\n"
+	if string(decoded) != expected {
+		t.Fatalf("unexpected converted source:\n%s", string(decoded))
+	}
+}
+
+func TestRenameNotebookCrossLanguageImportFailsKeepsOld(t *testing.T) {
+	deleteCalled := false
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fold.py") {
+				return fs.ErrNotExist
+			}
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fold") {
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/old",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				}
+				return nil
+			}
+			return fs.ErrNotExist
+		},
+	}
+
+	mockWorkspace := &MockWorkspaceClient{
+		ExportFunc: func(ctx context.Context, req workspace.ExportRequest) (*workspace.ExportResponse, error) {
+			content := "# Databricks notebook source\nprint('hello')\n"
+			return &workspace.ExportResponse{
+				Content: base64.StdEncoding.EncodeToString([]byte(content)),
+			}, nil
+		},
+		UploadFunc: func(ctx context.Context, path string, r io.Reader, opts ...workspace.UploadOption) error {
+			return fmt.Errorf("import failed")
+		},
+		DeleteFunc: func(ctx context.Context, req workspace.Delete) error {
+			deleteCalled = true
+			return nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, nil)
+
+	err := client.Rename(context.Background(), "/test/old.py", "/test/new.sql")
+	if err == nil {
+		t.Fatal("expected error from failed import, got nil")
+	}
+	if deleteCalled {
+		t.Fatal("old notebook should not be deleted when import fails")
+	}
+}
+
+func TestRenameNotebookCrossLanguageDeleteFailsLeavesBoth(t *testing.T) {
+	importCalled := false
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fold.py") {
+				return fs.ErrNotExist
+			}
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fold") {
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/old",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				}
+				return nil
+			}
+			return fs.ErrNotExist
+		},
+	}
+
+	mockWorkspace := &MockWorkspaceClient{
+		ExportFunc: func(ctx context.Context, req workspace.ExportRequest) (*workspace.ExportResponse, error) {
+			content := "# Databricks notebook source\nprint('hello')\n"
+			return &workspace.ExportResponse{
+				Content: base64.StdEncoding.EncodeToString([]byte(content)),
+			}, nil
+		},
+		UploadFunc: func(ctx context.Context, path string, r io.Reader, opts ...workspace.UploadOption) error {
+			importCalled = true
+			return nil
+		},
+		DeleteFunc: func(ctx context.Context, req workspace.Delete) error {
+			return fmt.Errorf("delete failed")
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, nil)
+
+	err := client.Rename(context.Background(), "/test/old.py", "/test/new.sql")
+	if err == nil {
+		t.Fatal("expected error from failed delete, got nil")
+	}
+	if !importCalled {
+		t.Fatal("import should have been called before delete")
 	}
 }
 

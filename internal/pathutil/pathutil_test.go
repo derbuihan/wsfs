@@ -1,187 +1,168 @@
 package pathutil
 
-import "testing"
+import (
+	"testing"
 
-func TestToRemotePath(t *testing.T) {
+	"github.com/databricks/databricks-sdk-go/service/workspace"
+)
+
+func TestNotebookSourceSuffix(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
+		language workspace.Language
 		expected string
 	}{
-		{
-			name:     "notebook with .ipynb suffix",
-			input:    "/Users/test/notebook.ipynb",
-			expected: "/Users/test/notebook",
-		},
-		{
-			name:     "regular file without suffix",
-			input:    "/Users/test/file.txt",
-			expected: "/Users/test/file.txt",
-		},
-		{
-			name:     "file with .ipynb in middle of name",
-			input:    "/Users/test/file.ipynb.txt",
-			expected: "/Users/test/file.ipynb.txt",
-		},
-		{
-			name:     "just filename with .ipynb",
-			input:    "notebook.ipynb",
-			expected: "notebook",
-		},
-		{
-			name:     "empty string",
-			input:    "",
-			expected: "",
-		},
-		{
-			name:     "path ending with .ipynb directory",
-			input:    "/Users/test/.ipynb",
-			expected: "/Users/test/",
-		},
-		{
-			name:     "nested notebook path",
-			input:    "/Users/test/subdir/deep/notebook.ipynb",
-			expected: "/Users/test/subdir/deep/notebook",
-		},
+		{language: workspace.LanguagePython, expected: ".py"},
+		{language: workspace.LanguageSql, expected: ".sql"},
+		{language: workspace.LanguageScala, expected: ".scala"},
+		{language: workspace.LanguageR, expected: ".R"},
+		{language: "", expected: ""},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := ToRemotePath(tt.input)
-			if result != tt.expected {
-				t.Errorf("ToRemotePath(%q) = %q, want %q", tt.input, result, tt.expected)
-			}
-		})
+		if got := NotebookSourceSuffix(tt.language); got != tt.expected {
+			t.Fatalf("NotebookSourceSuffix(%q) = %q, want %q", tt.language, got, tt.expected)
+		}
 	}
 }
 
-func TestToFuseName(t *testing.T) {
+func TestNotebookVisibleName(t *testing.T) {
 	tests := []struct {
 		name       string
 		remoteName string
-		isNotebook bool
+		language   workspace.Language
 		expected   string
 	}{
-		{
-			name:       "notebook gets .ipynb suffix",
-			remoteName: "notebook",
-			isNotebook: true,
-			expected:   "notebook.ipynb",
-		},
-		{
-			name:       "regular file unchanged",
-			remoteName: "file.txt",
-			isNotebook: false,
-			expected:   "file.txt",
-		},
-		{
-			name:       "directory unchanged",
-			remoteName: "subdir",
-			isNotebook: false,
-			expected:   "subdir",
-		},
-		{
-			name:       "empty name notebook",
-			remoteName: "",
-			isNotebook: true,
-			expected:   ".ipynb",
-		},
-		{
-			name:       "empty name non-notebook",
-			remoteName: "",
-			isNotebook: false,
-			expected:   "",
-		},
-		{
-			name:       "notebook with special chars",
-			remoteName: "my-notebook_v2",
-			isNotebook: true,
-			expected:   "my-notebook_v2.ipynb",
-		},
+		{name: "python notebook", remoteName: "note", language: workspace.LanguagePython, expected: "note.py"},
+		{name: "sql notebook", remoteName: "query", language: workspace.LanguageSql, expected: "query.sql"},
+		{name: "scala notebook", remoteName: "job", language: workspace.LanguageScala, expected: "job.scala"},
+		{name: "r notebook", remoteName: "report", language: workspace.LanguageR, expected: "report.R"},
+		{name: "unknown notebook", remoteName: "mystery", language: "", expected: "mystery.ipynb"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ToFuseName(tt.remoteName, tt.isNotebook)
-			if result != tt.expected {
-				t.Errorf("ToFuseName(%q, %v) = %q, want %q", tt.remoteName, tt.isNotebook, result, tt.expected)
+			if got := NotebookVisibleName(tt.remoteName, tt.language); got != tt.expected {
+				t.Fatalf("NotebookVisibleName(%q, %q) = %q, want %q", tt.remoteName, tt.language, got, tt.expected)
 			}
 		})
 	}
 }
 
-func TestHasNotebookSuffix(t *testing.T) {
+func TestNotebookVisiblePath(t *testing.T) {
+	if got := NotebookVisiblePath("/Users/test/note", workspace.LanguagePython); got != "/Users/test/note.py" {
+		t.Fatalf("unexpected python visible path: %s", got)
+	}
+	if got := NotebookVisiblePath("/Users/test/note", ""); got != "/Users/test/note.ipynb" {
+		t.Fatalf("unexpected fallback visible path: %s", got)
+	}
+}
+
+func TestNotebookRemotePathFromSourcePath(t *testing.T) {
 	tests := []struct {
-		name     string
+		name        string
+		visiblePath string
+		expected    string
+		language    workspace.Language
+		ok          bool
+	}{
+		{name: "python", visiblePath: "/Users/test/note.py", expected: "/Users/test/note", language: workspace.LanguagePython, ok: true},
+		{name: "sql", visiblePath: "/Users/test/query.sql", expected: "/Users/test/query", language: workspace.LanguageSql, ok: true},
+		{name: "scala", visiblePath: "/Users/test/job.scala", expected: "/Users/test/job", language: workspace.LanguageScala, ok: true},
+		{name: "r", visiblePath: "/Users/test/report.R", expected: "/Users/test/report", language: workspace.LanguageR, ok: true},
+		{name: "regular file", visiblePath: "/Users/test/file.txt", expected: "", language: "", ok: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, language, ok := NotebookRemotePathFromSourcePath(tt.visiblePath)
+			if got != tt.expected || language != tt.language || ok != tt.ok {
+				t.Fatalf("NotebookRemotePathFromSourcePath(%q) = (%q, %q, %v), want (%q, %q, %v)", tt.visiblePath, got, language, ok, tt.expected, tt.language, tt.ok)
+			}
+		})
+	}
+}
+
+func TestNotebookRemotePathFromFallbackPath(t *testing.T) {
+	got, ok := NotebookRemotePathFromFallbackPath("/Users/test/note.ipynb")
+	if !ok {
+		t.Fatal("expected fallback path to resolve")
+	}
+	if got != "/Users/test/note" {
+		t.Fatalf("unexpected fallback remote path: %s", got)
+	}
+
+	if _, ok := NotebookRemotePathFromFallbackPath("/Users/test/note.py"); ok {
+		t.Fatal("did not expect source path to resolve as fallback")
+	}
+}
+
+func TestNotebookSourceSuffixHelpers(t *testing.T) {
+	if !HasNotebookSourceSuffix("/Users/test/note.py") {
+		t.Fatal("expected python source suffix")
+	}
+	if HasNotebookSourceSuffix("/Users/test/note.ipynb") {
+		t.Fatal("did not expect fallback suffix to count as source suffix")
+	}
+	if !HasNotebookFallbackSuffix("/Users/test/note.ipynb") {
+		t.Fatal("expected fallback suffix")
+	}
+	if HasNotebookFallbackSuffix("/Users/test/note.py") {
+		t.Fatal("did not expect source suffix to count as fallback suffix")
+	}
+}
+
+func TestNotebookSourceMarkers(t *testing.T) {
+	tests := []struct {
+		language workspace.Language
+		header   string
+		cell     string
+	}{
+		{language: workspace.LanguagePython, header: "# Databricks notebook source", cell: "# COMMAND ----------"},
+		{language: workspace.LanguageSql, header: "-- Databricks notebook source", cell: "-- COMMAND ----------"},
+		{language: workspace.LanguageScala, header: "// Databricks notebook source", cell: "// COMMAND ----------"},
+		{language: workspace.LanguageR, header: "# Databricks notebook source", cell: "# COMMAND ----------"},
+	}
+
+	for _, tt := range tests {
+		if got := NotebookSourceHeader(tt.language); got != tt.header {
+			t.Fatalf("NotebookSourceHeader(%q) = %q, want %q", tt.language, got, tt.header)
+		}
+		if got := NotebookCellDelimiter(tt.language); got != tt.cell {
+			t.Fatalf("NotebookCellDelimiter(%q) = %q, want %q", tt.language, got, tt.cell)
+		}
+	}
+}
+
+func TestNotebookVisibleRoundTrip(t *testing.T) {
+	known := []struct {
 		path     string
-		expected bool
+		language workspace.Language
 	}{
-		{
-			name:     "path with .ipynb suffix",
-			path:     "/Users/test/notebook.ipynb",
-			expected: true,
-		},
-		{
-			name:     "path without suffix",
-			path:     "/Users/test/file.txt",
-			expected: false,
-		},
-		{
-			name:     "path with .ipynb in middle",
-			path:     "/Users/test/file.ipynb.txt",
-			expected: false,
-		},
-		{
-			name:     "just .ipynb",
-			path:     ".ipynb",
-			expected: true,
-		},
-		{
-			name:     "empty string",
-			path:     "",
-			expected: false,
-		},
-		{
-			name:     "similar but not exact suffix",
-			path:     "/Users/test/file.IPYNB",
-			expected: false, // case sensitive
-		},
-		{
-			name:     "partial suffix",
-			path:     "/Users/test/file.ipyn",
-			expected: false,
-		},
+		{path: "/Users/test/notebook", language: workspace.LanguagePython},
+		{path: "/Users/test/query", language: workspace.LanguageSql},
+		{path: "/Users/test/job", language: workspace.LanguageScala},
+		{path: "/Users/test/report", language: workspace.LanguageR},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := HasNotebookSuffix(tt.path)
-			if result != tt.expected {
-				t.Errorf("HasNotebookSuffix(%q) = %v, want %v", tt.path, result, tt.expected)
+	for _, tt := range known {
+		t.Run(string(tt.language), func(t *testing.T) {
+			visible := NotebookVisiblePath(tt.path, tt.language)
+			back, language, ok := NotebookRemotePathFromSourcePath(visible)
+			if !ok {
+				t.Fatal("expected source path round trip to resolve")
+			}
+			if back != tt.path || language != tt.language {
+				t.Fatalf("round trip = (%q, %q), want (%q, %q)", back, language, tt.path, tt.language)
 			}
 		})
 	}
-}
 
-// TestRoundTrip verifies that ToRemotePath and ToFuseName are inverse operations for notebooks
-func TestRoundTrip(t *testing.T) {
-	tests := []struct {
-		remoteName string
-	}{
-		{"notebook"},
-		{"my-notebook"},
-		{"notebook_v2"},
-		{"深層学習"},
+	visible := NotebookVisiblePath("/Users/test/mystery", "")
+	back, ok := NotebookRemotePathFromFallbackPath(visible)
+	if !ok {
+		t.Fatal("expected fallback round trip to resolve")
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.remoteName, func(t *testing.T) {
-			// Remote -> Fuse -> Remote should be identity
-			fuseName := ToFuseName(tt.remoteName, true)
-			backToRemote := ToRemotePath(fuseName)
-			if backToRemote != tt.remoteName {
-				t.Errorf("Round trip failed: %q -> %q -> %q", tt.remoteName, fuseName, backToRemote)
-			}
-		})
+	if back != "/Users/test/mystery" {
+		t.Fatalf("unexpected fallback round trip path: %s", back)
 	}
 }

@@ -46,7 +46,7 @@ docker compose run --rm wsfs-vscode-test bash -c "
 
   # Build wsfs
   echo 'Building wsfs...'
-  go build -o /tmp/wsfs ./cmd/wsfs
+  go build -buildvcs=false -o /tmp/wsfs ./cmd/wsfs
 
   # Set up directories
   mkdir -p /mnt/wsfs /tmp/wsfs-cache

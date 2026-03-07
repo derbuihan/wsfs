@@ -3,6 +3,7 @@ package databricks
 import (
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"strings"
@@ -13,13 +14,13 @@ import (
 
 // FakeWorkspaceAPI is a test double for WorkspaceFilesAPI
 type FakeWorkspaceAPI struct {
-	StatFunc    func(ctx context.Context, filePath string) (fs.FileInfo, error)
-	ReadDirFunc func(ctx context.Context, dirPath string) ([]fs.DirEntry, error)
-	ReadAllFunc func(ctx context.Context, filePath string) ([]byte, error)
-	WriteFunc   func(ctx context.Context, filepath string, data []byte) error
-	DeleteFunc  func(ctx context.Context, filePath string, recursive bool) error
-	MkdirFunc   func(ctx context.Context, dirPath string) error
-	RenameFunc  func(ctx context.Context, sourcePath string, destinationPath string) error
+	StatFunc            func(ctx context.Context, filePath string) (fs.FileInfo, error)
+	ReadDirFunc         func(ctx context.Context, dirPath string) ([]fs.DirEntry, error)
+	ReadAllFunc         func(ctx context.Context, filePath string) ([]byte, error)
+	WriteFunc           func(ctx context.Context, filepath string, data []byte) error
+	DeleteFunc          func(ctx context.Context, filePath string, recursive bool) error
+	MkdirFunc           func(ctx context.Context, dirPath string) error
+	RenameFunc          func(ctx context.Context, sourcePath string, destinationPath string) error
 	CacheSetFunc        func(path string, info fs.FileInfo)
 	CacheInvalidateFunc func(filePath string)
 }
@@ -92,6 +93,7 @@ type MockWorkspaceClient struct {
 	DeleteFunc func(ctx context.Context, request workspace.Delete) error
 	MkdirsFunc func(ctx context.Context, request workspace.Mkdirs) error
 	ImportFunc func(ctx context.Context, request workspace.Import) error
+	UploadFunc func(ctx context.Context, path string, r io.Reader, opts ...workspace.UploadOption) error
 }
 
 func (m *MockWorkspaceClient) Export(ctx context.Context, request workspace.ExportRequest) (*workspace.ExportResponse, error) {
@@ -118,6 +120,13 @@ func (m *MockWorkspaceClient) Mkdirs(ctx context.Context, request workspace.Mkdi
 func (m *MockWorkspaceClient) Import(ctx context.Context, request workspace.Import) error {
 	if m.ImportFunc != nil {
 		return m.ImportFunc(ctx, request)
+	}
+	return fmt.Errorf("not implemented")
+}
+
+func (m *MockWorkspaceClient) Upload(ctx context.Context, path string, r io.Reader, opts ...workspace.UploadOption) error {
+	if m.UploadFunc != nil {
+		return m.UploadFunc(ctx, path, r, opts...)
 	}
 	return fmt.Errorf("not implemented")
 }

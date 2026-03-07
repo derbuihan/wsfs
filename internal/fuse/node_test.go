@@ -1038,17 +1038,17 @@ func TestOpenNoChangeWhenRemoteNotModified(t *testing.T) {
 }
 
 // ============================================================================
-// Notebook (.ipynb) Extension Tests
+// Notebook Source Display Tests
 // ============================================================================
 
-// TestReaddirAddsIpynbExtension verifies that Readdir adds .ipynb extension to notebooks
-func TestReaddirAddsIpynbExtension(t *testing.T) {
+func TestReaddirUsesSourceExtensionsForNotebooks(t *testing.T) {
 	api := &databricks.FakeWorkspaceAPI{
 		ReadDirFunc: func(ctx context.Context, dirPath string) ([]fs.DirEntry, error) {
 			return []fs.DirEntry{
 				databricks.WSDirEntry{WSFileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
 					Path:       "/test/notebook1",
 					ObjectType: workspace.ObjectTypeNotebook,
+					Language:   workspace.LanguagePython,
 				}}},
 				databricks.WSDirEntry{WSFileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
 					Path:       "/test/file.txt",
@@ -1085,36 +1085,87 @@ func TestReaddirAddsIpynbExtension(t *testing.T) {
 		t.Fatalf("Expected 3 entries, got %d", len(entries))
 	}
 
-	// Check notebook has .ipynb extension
+	// Check notebook has source extension
 	found := false
 	for _, e := range entries {
-		if e.Name == "notebook1.ipynb" {
+		if e.Name == "notebook1.py" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Error("Expected notebook to have .ipynb extension")
+		t.Error("Expected notebook to have .py extension")
 	}
 
-	// Check regular file doesn't have .ipynb extension
+	// Check regular file doesn't get notebook suffix
 	for _, e := range entries {
-		if e.Name == "file.txt.ipynb" {
-			t.Error("Regular file should not have .ipynb extension")
+		if e.Name == "file.txt.py" {
+			t.Error("Regular file should not have notebook extension")
 		}
 	}
 
-	// Check directory doesn't have .ipynb extension
+	// Check directory doesn't get notebook suffix
 	for _, e := range entries {
-		if e.Name == "subdir.ipynb" {
-			t.Error("Directory should not have .ipynb extension")
+		if e.Name == "subdir.py" {
+			t.Error("Directory should not have notebook extension")
 		}
 	}
 }
 
-// Note: TestCreateNotebook is not included here because Create() requires
-// a fully initialized FUSE bridge (NewPersistentInode). The notebook creation
-// logic is tested via client_test.go::TestWriteNotebook instead.
+func TestReaddirFallsBackToIpynbOnCollision(t *testing.T) {
+	api := &databricks.FakeWorkspaceAPI{
+		ReadDirFunc: func(ctx context.Context, dirPath string) ([]fs.DirEntry, error) {
+			return []fs.DirEntry{
+				databricks.WSDirEntry{WSFileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+					Path:       "/test/notebook1",
+					ObjectType: workspace.ObjectTypeNotebook,
+					Language:   workspace.LanguagePython,
+				}}},
+				databricks.WSDirEntry{WSFileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+					Path:       "/test/notebook1.py",
+					ObjectType: workspace.ObjectTypeFile,
+				}}},
+			}, nil
+		},
+	}
+
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeDirectory,
+			Path:       "/test",
+		}},
+	}
+
+	dirStream, errno := n.Readdir(context.Background())
+	if errno != 0 {
+		t.Fatalf("Readdir failed with errno: %d", errno)
+	}
+
+	entries := []fuse.DirEntry{}
+	for dirStream.HasNext() {
+		entry, _ := dirStream.Next()
+		entries = append(entries, entry)
+	}
+
+	if len(entries) != 2 {
+		t.Fatalf("Expected 2 entries, got %d", len(entries))
+	}
+
+	foundFile := false
+	foundNotebook := false
+	for _, entry := range entries {
+		if entry.Name == "notebook1.py" {
+			foundFile = true
+		}
+		if entry.Name == "notebook1.ipynb" {
+			foundNotebook = true
+		}
+	}
+	if !foundFile || !foundNotebook {
+		t.Fatalf("expected both exact file and fallback notebook entry, got %+v", entries)
+	}
+}
 
 func TestValidateChildPath(t *testing.T) {
 	tests := []struct {

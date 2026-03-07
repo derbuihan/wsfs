@@ -14,7 +14,8 @@
 #   6. Error Handling (ENOENT, EISDIR, ENOTDIR)
 #   7. Editor Compatibility (vim save patterns)
 #   8. Large Files & Concurrency
-#   9. Databricks CLI Verification (optional)
+#   9. Notebook Source Display
+#   10. Databricks CLI Verification (optional)
 
 set -euo pipefail
 
@@ -330,9 +331,41 @@ echo -e "${GREEN}✓ PASS:${NC} Concurrent reads completed without errors"
 ((TEST_PASSED++)) || true
 
 # ============================================
-# SECTION 9: Databricks CLI Verification (Optional)
+# SECTION 9: Notebook Source Display
 # ============================================
-print_section "Section 9: Databricks CLI Verification"
+print_section "Section 9: Notebook Source Display"
+
+run_cmd 'echo "print(123)" > source_note.py'
+assert_file_exists "source_note.py" "Notebook created with .py source suffix"
+CONTENT=$(cat source_note.py | tr -d '\r')
+assert_contains "$CONTENT" "print(123)" "Notebook source content readable"
+
+run_cmd 'mv source_note.py source_note_renamed.py'
+assert_not_exists "source_note.py" "Old notebook source name removed after rename"
+assert_file_exists "source_note_renamed.py" "Notebook rename within same language works"
+
+cat <<'EOF' > source_note_renamed.py
+# Databricks notebook source
+print(123)
+# COMMAND ----------
+print(456)
+EOF
+
+run_cmd 'mv source_note_renamed.py source_note_renamed.sql'
+assert_not_exists "source_note_renamed.py" "Old notebook source name removed after language rename"
+assert_file_exists "source_note_renamed.sql" "Notebook rename across language suffixes works"
+CONTENT=$(cat source_note_renamed.sql | tr -d '\r')
+assert_contains "$CONTENT" "-- Databricks notebook source" "Cross-language rename rewrites notebook header"
+assert_contains "$CONTENT" "-- COMMAND ----------" "Cross-language rename rewrites cell delimiter"
+assert_contains "$CONTENT" "print(456)" "Cross-language rename preserves notebook body"
+
+run_cmd 'rm source_note_renamed.sql'
+assert_not_exists "source_note_renamed.sql" "Notebook delete after source rename works"
+
+# ============================================
+# SECTION 10: Databricks CLI Verification (Optional)
+# ============================================
+print_section "Section 10: Databricks CLI Verification"
 
 if command -v databricks >/dev/null 2>&1 && [ -n "${DATABRICKS_HOST:-}" ] && [ -n "${DATABRICKS_TOKEN:-}" ]; then
   WORKSPACE_PATH=$(pwd | sed "s|^${MOUNT_POINT}||")
@@ -377,6 +410,55 @@ PY
       echo "  wsfs: $WSFS_CONTENT"
       echo "  CLI:  $CLI_CONTENT"
       ((TEST_FAILED++)) || true
+    fi
+  fi
+
+  # Verify notebook source files map to Databricks notebooks
+  NOTEBOOK_BASE="${WORKSPACE_PATH}/cli_verify_notebook"
+  echo "print('cli notebook')" > cli_verify_notebook.py
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - <<'PY'
+import os
+with open("cli_verify_notebook.py", "r+") as f:
+    f.flush()
+    os.fsync(f.fileno())
+PY
+  elif command -v python >/dev/null 2>&1; then
+    python - <<'PY'
+import os
+with open("cli_verify_notebook.py", "r+") as f:
+    f.flush()
+    os.fsync(f.fileno())
+PY
+  else
+    sync
+  fi
+
+  sleep 2
+
+  NOTEBOOK_STATUS=$(databricks workspace get-status "${NOTEBOOK_BASE}" -o json 2>/dev/null || echo "ERROR")
+  if [ "$NOTEBOOK_STATUS" = "ERROR" ]; then
+    echo -e "${YELLOW}⊘ SKIP:${NC} Could not verify notebook metadata via CLI"
+  else
+    if command -v python3 >/dev/null 2>&1; then
+      NOTEBOOK_OBJECT_TYPE=$(printf '%s' "$NOTEBOOK_STATUS" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("object_type", ""))')
+      NOTEBOOK_LANGUAGE=$(printf '%s' "$NOTEBOOK_STATUS" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("language", ""))')
+    elif command -v python >/dev/null 2>&1; then
+      NOTEBOOK_OBJECT_TYPE=$(printf '%s' "$NOTEBOOK_STATUS" | python -c 'import json,sys; print(json.load(sys.stdin).get("object_type", ""))')
+      NOTEBOOK_LANGUAGE=$(printf '%s' "$NOTEBOOK_STATUS" | python -c 'import json,sys; print(json.load(sys.stdin).get("language", ""))')
+    else
+      NOTEBOOK_OBJECT_TYPE=$(printf '%s' "$NOTEBOOK_STATUS" | grep -o '"object_type":[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
+      NOTEBOOK_LANGUAGE=$(printf '%s' "$NOTEBOOK_STATUS" | grep -o '"language":[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
+    fi
+
+    assert_eq "NOTEBOOK" "$NOTEBOOK_OBJECT_TYPE" "Notebook source file is stored as NOTEBOOK remotely"
+    assert_eq "PYTHON" "$NOTEBOOK_LANGUAGE" "Notebook source file keeps PYTHON language remotely"
+
+    CLI_NOTEBOOK_CONTENT=$(databricks workspace export "${NOTEBOOK_BASE}" --format SOURCE 2>/dev/null || echo "ERROR")
+    if [ "$CLI_NOTEBOOK_CONTENT" = "ERROR" ]; then
+      echo -e "${YELLOW}⊘ SKIP:${NC} Could not export notebook source via CLI"
+    else
+      assert_contains "$CLI_NOTEBOOK_CONTENT" "print('cli notebook')" "Databricks CLI notebook export matches wsfs source"
     fi
   fi
 else
