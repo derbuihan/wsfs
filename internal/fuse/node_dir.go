@@ -75,6 +75,39 @@ func renameTargetPath(sourceInfo databricks.WSFileInfo, visiblePath string) stri
 	return visiblePath
 }
 
+func notebookRenameChangesLanguage(sourceInfo databricks.WSFileInfo, visiblePath string) bool {
+	if !sourceInfo.IsNotebook() {
+		return false
+	}
+
+	_, targetLanguage, ok := pathutil.NotebookRemotePathFromSourcePath(visiblePath)
+	if !ok {
+		return false
+	}
+
+	return targetLanguage != sourceInfo.Language
+}
+
+func flushRenameChildIfDirty(ctx context.Context, inode *fs.Inode) syscall.Errno {
+	if inode == nil {
+		return 0
+	}
+
+	node, ok := inode.Operations().(*WSNode)
+	if !ok {
+		return 0
+	}
+
+	node.mu.Lock()
+	defer node.mu.Unlock()
+
+	if !node.isDirtyLocked() {
+		return 0
+	}
+
+	return node.flushLocked(ctx)
+}
+
 func refreshRenamedNode(ctx context.Context, wfClient databricks.WorkspaceFilesAPI, inode *fs.Inode, visiblePath string, actualPath string) {
 	if inode == nil {
 		return
@@ -103,15 +136,6 @@ func refreshRenamedNode(ctx context.Context, wfClient databricks.WorkspaceFilesA
 	node.mu.Lock()
 	defer node.mu.Unlock()
 
-	logging.Debugf(
-		"Rename: refreshing in-memory node for %s (dirty=%v openCount=%d oldPath=%s newPath=%s language=%s)",
-		visiblePath,
-		node.isDirtyLocked(),
-		node.openCount,
-		node.fileInfo.Path,
-		wsInfo.Path,
-		wsInfo.Language,
-	)
 	node.fileInfo = wsInfo
 	node.resetBufferLocked()
 	node.buf.ReplaceOnFirstWrite = false
@@ -123,9 +147,7 @@ func notifyContentIfPossible(inode *fs.Inode, path string) {
 	}
 
 	defer func() {
-		if recovered := recover(); recovered != nil {
-			logging.Debugf("Rename: skipping kernel content invalidation for %s: %v", path, recovered)
-		}
+		_ = recover()
 	}()
 
 	if errno := inode.NotifyContent(0, 0); errno != 0 {
@@ -208,15 +230,10 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 					out.Attr.Size = uint64(len(existingNode.buf.Data))
 					out.Attr.Blocks = (out.Attr.Size + blockFactor - 1) / blockFactor
 				}
-				logging.Debugf(
-					"Lookup: returning existing dirty node for %s (openCount=%d size=%d)",
-					childPath,
-					existingNode.openCount,
-					len(existingNode.buf.Data),
-				)
 				existingNode.mu.Unlock()
 				out.SetEntryTimeout(entryTimeoutSec)
 				out.SetAttrTimeout(attrTimeoutSec)
+				logging.Debugf("Lookup: returning existing dirty node for %s", childPath)
 				return existingChild, 0
 			}
 			existingNode.mu.Unlock()
@@ -465,6 +482,8 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 		return syscall.EINVAL
 	}
 
+	childInode := n.GetChild(name)
+
 	opCtx, cancel := context.WithTimeout(ctx, metadataOpTimeout)
 	defer cancel()
 	info, err := n.wfClient.Stat(opCtx, oldPath)
@@ -476,6 +495,16 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 	if !ok {
 		logging.Debugf("Rename: unexpected file info type for %s", oldPath)
 		return syscall.EIO
+	}
+
+	languageChanged := notebookRenameChangesLanguage(wsInfo, newPath)
+	if languageChanged {
+		flushCtx, flushCancel := context.WithTimeout(ctx, dataOpTimeout)
+		defer flushCancel()
+		if errno := flushRenameChildIfDirty(flushCtx, childInode); errno != 0 {
+			logging.Warnf("Error flushing dirty notebook before rename %s -> %s: %v", oldPath, newPath, errno)
+			return errno
+		}
 	}
 
 	err = n.wfClient.Rename(opCtx, oldPath, newPath)
@@ -495,10 +524,8 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 		}
 	}
 
-	childInode := n.GetChild(name)
 	if childInode != nil {
-		if wsInfo.IsNotebook() && actualOldPath == actualNewPath && oldPath != newPath {
-			logging.Debugf("Rename: notebook language-only rename detected for %s -> %s", oldPath, newPath)
+		if languageChanged {
 			refreshRenamedNode(opCtx, n.wfClient, childInode, newPath, actualNewPath)
 			notifyContentIfPossible(childInode, newPath)
 		}

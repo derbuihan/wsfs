@@ -359,8 +359,48 @@ assert_contains "$CONTENT" "-- Databricks notebook source" "Cross-language renam
 assert_contains "$CONTENT" "-- COMMAND ----------" "Cross-language rename rewrites cell delimiter"
 assert_contains "$CONTENT" "print(456)" "Cross-language rename preserves notebook body"
 
+cat <<'EOF' > cross_name_note.py
+# Databricks notebook source
+print(777)
+# COMMAND ----------
+print(888)
+EOF
+
+run_cmd 'mv cross_name_note.py cross_name_renamed.sql'
+assert_not_exists "cross_name_note.py" "Old notebook source basename removed after cross-basename language rename"
+assert_file_exists "cross_name_renamed.sql" "Cross-basename language rename works"
+CONTENT=$(cat cross_name_renamed.sql | tr -d '\r')
+assert_contains "$CONTENT" "-- Databricks notebook source" "Cross-basename language rename rewrites notebook header"
+assert_contains "$CONTENT" "-- COMMAND ----------" "Cross-basename language rename rewrites cell delimiter"
+assert_contains "$CONTENT" "print(888)" "Cross-basename language rename preserves notebook body"
+
+DIRTY_RENAME_SCRIPT=$(mktemp)
+cat <<'EOF' > "$DIRTY_RENAME_SCRIPT"
+#!/bin/sh
+exec 3> dirty_open_note.py
+printf '%s' '# Databricks notebook source
+print(789)
+# COMMAND ----------
+print(999)
+' >&3
+mv dirty_open_note.py dirty_open_note.sql
+exec 3>&-
+EOF
+
+run_cmd "sh '$DIRTY_RENAME_SCRIPT'"
+rm -f "$DIRTY_RENAME_SCRIPT"
+assert_not_exists "dirty_open_note.py" "Dirty open notebook old source name removed after language rename"
+assert_file_exists "dirty_open_note.sql" "Dirty open notebook rename across language suffixes works"
+CONTENT=$(cat dirty_open_note.sql | tr -d '\r')
+assert_contains "$CONTENT" "-- Databricks notebook source" "Dirty open notebook rename rewrites notebook header"
+assert_contains "$CONTENT" "-- COMMAND ----------" "Dirty open notebook rename rewrites cell delimiter"
+assert_contains "$CONTENT" "print(999)" "Dirty open notebook rename preserves unflushed body content"
+
 run_cmd 'rm source_note_renamed.sql'
 assert_not_exists "source_note_renamed.sql" "Notebook delete after source rename works"
+run_cmd 'rm cross_name_renamed.sql dirty_open_note.sql'
+assert_not_exists "cross_name_renamed.sql" "Cross-basename notebook delete after source rename works"
+assert_not_exists "dirty_open_note.sql" "Dirty open notebook delete after source rename works"
 
 # ============================================
 # SECTION 10: Databricks CLI Verification (Optional)
