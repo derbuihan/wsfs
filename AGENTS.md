@@ -6,7 +6,7 @@ AI coding agent guidance for this repo.
 1. Confirm `Task.md` and select the task to work on.
 2. Implement the task.
 3. Run tests to confirm no regression.
-   - Always run the FUSE test suite after implementation (normally `./scripts/run_tests_docker.sh --fuse-only`). If it fails, fix the failing part.
+   - Always run the FUSE test suite after implementation (normally `./scripts/test_docker.sh --fuse-only`). If it fails, fix the failing part.
 4. Update `Task.md` when progress changes.
 
 ## Project overview
@@ -16,13 +16,13 @@ Key entry points:
 - `main.go`: CLI entry point and mount setup.
 - `client.go`: Databricks Workspace Files client.
 - `node.go`: FUSE node implementation.
-- `scripts/fuse_test.sh`: Filesystem integration tests.
+- `scripts/tests/fuse_test.sh`: Filesystem integration tests.
 
 ## Current behavior notes
-- `Setattr` supports size changes (truncate); timestamp-only updates on existing files return `ENOTSUP`.
-- mode/uid/gid changes are `ENOTSUP`.
+- `Setattr` supports size changes (truncate); timestamp-only updates on existing files return `ENOTSUP`, but the initial post-create timestamp sync for a brand-new empty file succeeds as a compatibility no-op.
+- `chmod` succeeds as a compatibility no-op; `chown`/`chgrp`/uid/gid changes are `ENOTSUP`.
 - Stable inode IDs are derived from Databricks `ObjectId`/`ResourceId`/`Path` to avoid editor save errors.
-- Vim save paths (default/backup/swap) are validated in `scripts/fuse_test.sh`.
+- Vim save paths (default/backup/swap) are validated in `scripts/tests/fuse_test.sh`.
 
 ## Environment
 Required env vars (do not commit secrets):
@@ -53,7 +53,7 @@ Run one command inside the mounted container instead of an interactive shell:
 ## Tests
 Docker (recommended on macOS and Linux):
 ```bash
-./scripts/run_tests_docker.sh
+./scripts/test_docker.sh
 ```
 
 Debugging failing shell tests (Docker):

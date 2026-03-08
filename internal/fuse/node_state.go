@@ -83,19 +83,20 @@ const (
 
 type WSNode struct {
 	fs.Inode
-	wfClient          databricks.WorkspaceFilesAPI
-	diskCache         *filecache.DiskCache
-	fileInfo          databricks.WSFileInfo
-	buf               fileBuffer
-	mu                sync.Mutex
-	registry          *DirtyNodeRegistry
-	ownerUid          uint32 // UID of the mount owner
-	ownerGid          uint32 // GID of the mount owner
-	restrictAccess    bool   // Enforce access control when true
-	openCount         int
-	dirtyFlags        dirtyFlag
-	pendingTruncate   bool
-	metadataCheckedAt time.Time
+	wfClient                  databricks.WorkspaceFilesAPI
+	diskCache                 *filecache.DiskCache
+	fileInfo                  databricks.WSFileInfo
+	buf                       fileBuffer
+	mu                        sync.Mutex
+	registry                  *DirtyNodeRegistry
+	ownerUid                  uint32 // UID of the mount owner
+	ownerGid                  uint32 // GID of the mount owner
+	restrictAccess            bool   // Enforce access control when true
+	openCount                 int
+	dirtyFlags                dirtyFlag
+	pendingTruncate           bool
+	allowPostCreateTimestamps bool
+	metadataCheckedAt         time.Time
 }
 
 var _ = (fs.NodeGetattrer)((*WSNode)(nil))
@@ -186,6 +187,9 @@ func (n *WSNode) incrementOpenLocked() {
 func (n *WSNode) decrementOpenLocked() {
 	if n.openCount > 0 {
 		n.openCount--
+		if n.openCount == 0 {
+			n.allowPostCreateTimestamps = false
+		}
 		return
 	}
 	logging.Warnf("Release called with openCount=0 for %s", n.Path())

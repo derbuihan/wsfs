@@ -15,7 +15,7 @@ A FUSE-based file system to interact with Databricks workspace files and directo
 - [x] Expose Databricks notebooks as source files (`.py`, `.sql`, `.scala`, `.R`) based on notebook language.
 
 Notes:
-- `Setattr` supports size changes. Timestamp-only updates on existing files (`atime`, `mtime`, or both) return `ENOTSUP`. `chmod` succeeds as a compatibility no-op, while `chown` still returns `ENOTSUP`.
+- `Setattr` supports size changes. Timestamp-only updates on existing files (`atime`, `mtime`, or both) return `ENOTSUP`, while the initial post-create timestamp sync for a brand-new empty file is accepted as a compatibility no-op so `touch new-file` works. `chmod` succeeds as a compatibility no-op, while `chown` still returns `ENOTSUP`.
 - Vim saves are verified in the test suite.
 - Notebooks are shown as source files by default. `.ipynb` appears only as a fallback when the preferred source name collides with an exact workspace entry or when notebook language is unknown.
 
@@ -184,7 +184,7 @@ $ ./scripts/run_wsfs_docker.sh --debug
 
 ## Testing
 
-wsfs includes comprehensive test suites covering FUSE operations, caching behavior, and stress testing.
+wsfs includes comprehensive test suites covering FUSE operations, caching behavior, stress testing, and a VSCode core development loop.
 
 ### Quick Start
 
@@ -195,11 +195,11 @@ go test ./...
 # Open a Docker shell with wsfs mounted inside the container
 ./scripts/run_wsfs_docker.sh
 
-# Integration tests via Docker (macOS and Linux)
-./scripts/run_tests_docker.sh
+# Standard integration tests via Docker (macOS and Linux)
+./scripts/test_docker.sh
 
 # VSCode integration tests via Docker (Core dev loop)
-./scripts/run_vscode_tests_docker.sh
+./scripts/test_vscode_docker.sh
 ```
 
 **Prerequisites:**
@@ -210,12 +210,14 @@ go test ./...
 
 | Suite | Script | Description |
 |-------|--------|-------------|
+| **Mounted test runner** | `scripts/tests/run.sh` | Runs the shell suites against an already-mounted wsfs filesystem |
 | **FUSE tests** | `scripts/tests/fuse_test.sh` | File/directory operations, vim compatibility, timestamp-only `Setattr` expectations |
 | **Cache tests** | `scripts/tests/cache_test.sh` | Default cache population, invalidation, and out-of-band remote refresh checks |
 | **Stress tests** | `scripts/tests/stress_test.sh` | Concurrent access, rapid truncate, rename |
 | **Security / allow-other** | `scripts/tests/security_test.sh` | Validates `--allow-other` exposure semantics with a second local user |
-| **Docker shell** | `scripts/run_wsfs_docker.sh` | Opens a shell with wsfs mounted inside the container for macOS/Linux development |
-| **VSCode core dev loop** | `scripts/run_vscode_tests_docker.sh` | One VSCode session covering edit/save/search/rename/terminal/Python run |
+| **Docker shell** | `scripts/run_wsfs_docker.sh` | Common Docker wrapper that builds, mounts, and runs a shell or command |
+| **Docker integration wrapper** | `scripts/test_docker.sh` | Runs the standard integration suites, including a separate `--allow-other` security stage |
+| **VSCode core dev loop** | `scripts/test_vscode_docker.sh` | Runs the VSCode E2E project in `scripts/tests/vscode/` |
 
 ### Test Options
 
@@ -223,16 +225,20 @@ go test ./...
 # Open an interactive shell with wsfs mounted inside Docker
 ./scripts/run_wsfs_docker.sh
 
-# Run specific test suite
-./scripts/run_tests_docker.sh --fuse-only
-./scripts/run_tests_docker.sh --cache-only
-./scripts/run_tests_docker.sh --stress-only
+# Run shell suites against an existing mount
+./scripts/tests/run.sh /mnt/wsfs --fuse-only
 
-# Skip specific tests
-./scripts/run_tests_docker.sh --skip-stress
+# Run specific Docker-backed test suites
+./scripts/test_docker.sh --fuse-only
+./scripts/test_docker.sh --cache-only
+./scripts/test_docker.sh --stress-only
 
-# Rebuild Docker image
-./scripts/run_tests_docker.sh --build
+# Skip specific suites
+./scripts/test_docker.sh --skip-stress
+
+# Rebuild Docker images
+./scripts/test_docker.sh --build
+./scripts/test_vscode_docker.sh --build
 ./scripts/run_wsfs_docker.sh --build
 ```
 

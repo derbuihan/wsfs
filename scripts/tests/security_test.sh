@@ -60,13 +60,7 @@ echo ""
 
 print_section "Section 1: Owner Access"
 
-if ls "${TEST_BASE_DIR}" > /dev/null 2>&1; then
-  echo -e "${GREEN}✓ PASS:${NC} Owner can list directory"
-  ((TEST_PASSED++)) || true
-else
-  echo -e "${RED}✗ FAIL:${NC} Owner can list directory"
-  ((TEST_FAILED++)) || true
-fi
+assert 'ls "${TEST_BASE_DIR}" >/dev/null 2>&1' "Owner can list directory"
 
 OWNER_FILE="${TEST_BASE_DIR}/owner_test_file.txt"
 printf 'owner content' > "${OWNER_FILE}"
@@ -92,13 +86,7 @@ else
   SHARED_FILE="${TEST_BASE_DIR}/shared.txt"
   printf 'shared content' > "${SHARED_FILE}"
 
-  if run_as_other ls "${TEST_BASE_DIR}" > /dev/null 2>&1; then
-    echo -e "${GREEN}✓ PASS:${NC} Non-owner can list directory"
-    ((TEST_PASSED++)) || true
-  else
-    echo -e "${RED}✗ FAIL:${NC} Non-owner can list directory"
-    ((TEST_FAILED++)) || true
-  fi
+  assert 'run_as_other ls "${TEST_BASE_DIR}" >/dev/null 2>&1' "Non-owner can list directory"
 
   OTHER_CONTENT=$(run_as_other cat "${SHARED_FILE}")
   assert_eq "shared content" "$OTHER_CONTENT" "Non-owner can read file"

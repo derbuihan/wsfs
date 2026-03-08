@@ -217,6 +217,89 @@ func TestWSNodeCreateNotebook(t *testing.T) {
 	}
 }
 
+func TestWSNodeCreateAllowsPostCreateTimestampNoOp(t *testing.T) {
+	api := &databricks.FakeWorkspaceAPI{
+		WriteFunc: func(ctx context.Context, filepath string, data []byte) error {
+			return nil
+		},
+		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			return databricks.NewTestFileInfo(filePath, 0, false), nil
+		},
+	}
+
+	root := newTestRootNode(t, api)
+	out := &fuse.EntryOut{}
+	child, _, _, errno := root.Create(context.Background(), "file.txt", 0, 0644, out)
+	if errno != 0 || child == nil {
+		t.Fatalf("Create failed: errno=%d child=%v", errno, child)
+	}
+
+	node, ok := child.Operations().(*WSNode)
+	if !ok {
+		t.Fatalf("expected WSNode child, got %T", child.Operations())
+	}
+
+	setattr := &fuse.SetAttrIn{SetAttrInCommon: fuse.SetAttrInCommon{
+		Valid: fuse.FATTR_ATIME | fuse.FATTR_MTIME,
+		Atime: uint64(time.Now().Unix()),
+		Mtime: uint64(time.Now().Unix()),
+	}}
+	setattrOut := &fuse.AttrOut{}
+	if errno := node.Setattr(context.Background(), nil, setattr, setattrOut); errno != 0 {
+		t.Fatalf("expected initial timestamp-only setattr to succeed, got %d", errno)
+	}
+	if setattrOut.Size != 0 {
+		t.Fatalf("expected size 0, got %d", setattrOut.Size)
+	}
+
+	if errno := node.Release(context.Background(), nil); errno != 0 {
+		t.Fatalf("Release failed: %d", errno)
+	}
+
+	if errno := node.Setattr(context.Background(), nil, setattr, &fuse.AttrOut{}); errno != syscall.ENOTSUP {
+		t.Fatalf("expected timestamp-only setattr after release to fail with ENOTSUP, got %d", errno)
+	}
+}
+
+func TestWSNodeCreateRejectsTimestampOnlyAfterWrite(t *testing.T) {
+	api := &databricks.FakeWorkspaceAPI{
+		ReadAllFunc: func(ctx context.Context, filePath string) ([]byte, error) {
+			return []byte{}, nil
+		},
+		WriteFunc: func(ctx context.Context, filepath string, data []byte) error {
+			return nil
+		},
+		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			return databricks.NewTestFileInfo(filePath, 0, false), nil
+		},
+	}
+
+	root := newTestRootNode(t, api)
+	out := &fuse.EntryOut{}
+	child, _, _, errno := root.Create(context.Background(), "file.txt", 0, 0644, out)
+	if errno != 0 || child == nil {
+		t.Fatalf("Create failed: errno=%d child=%v", errno, child)
+	}
+
+	node, ok := child.Operations().(*WSNode)
+	if !ok {
+		t.Fatalf("expected WSNode child, got %T", child.Operations())
+	}
+
+	if _, errno := node.Write(context.Background(), nil, []byte("touch"), 0); errno != 0 {
+		t.Fatalf("Write failed: %d", errno)
+	}
+
+	setattr := &fuse.SetAttrIn{SetAttrInCommon: fuse.SetAttrInCommon{
+		Valid: fuse.FATTR_ATIME | fuse.FATTR_MTIME,
+		Atime: uint64(time.Now().Unix()),
+		Mtime: uint64(time.Now().Unix()),
+	}}
+	if errno := node.Setattr(context.Background(), nil, setattr, &fuse.AttrOut{}); errno != syscall.ENOTSUP {
+		t.Fatalf("expected timestamp-only setattr after write to fail with ENOTSUP, got %d", errno)
+	}
+}
+
 func TestWSNodeCreateNotebookFirstWriteReplacesScaffold(t *testing.T) {
 	api := &databricks.FakeWorkspaceAPI{
 		WriteFunc: func(ctx context.Context, filepath string, data []byte) error {

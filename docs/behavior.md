@@ -27,6 +27,7 @@ POSIX expectations, and operational safety.
 - Supported:
   - size changes / truncate
   - chmod-style mode updates as compatibility no-ops
+  - the initial post-create timestamp sync for a brand-new empty file as a compatibility no-op (`touch new-file`)
 - Unsupported (`ENOTSUP`):
   - atime-only updates
   - mtime-only updates

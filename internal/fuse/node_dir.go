@@ -335,15 +335,16 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 		return nil, nil, 0, syscall.EIO
 	}
 	childNode := &WSNode{
-		wfClient:          n.wfClient,
-		diskCache:         n.diskCache,
-		fileInfo:          wsInfo,
-		buf:               fileBuffer{Data: initialContent, ReplaceOnFirstWrite: len(initialContent) > 0},
-		registry:          n.registry,
-		ownerUid:          n.ownerUid,
-		ownerGid:          n.ownerGid,
-		restrictAccess:    n.restrictAccess,
-		metadataCheckedAt: time.Now(),
+		wfClient:                  n.wfClient,
+		diskCache:                 n.diskCache,
+		fileInfo:                  wsInfo,
+		buf:                       fileBuffer{Data: initialContent, ReplaceOnFirstWrite: len(initialContent) > 0},
+		registry:                  n.registry,
+		ownerUid:                  n.ownerUid,
+		ownerGid:                  n.ownerGid,
+		restrictAccess:            n.restrictAccess,
+		allowPostCreateTimestamps: true,
+		metadataCheckedAt:         time.Now(),
 	}
 	childNode.incrementOpenLocked()
 	childNode.fillAttr(ctx, &out.Attr)

@@ -29,9 +29,9 @@ go test ./...
 go test -race ./...
 
 # Integration tests (requires .env with DATABRICKS_HOST/TOKEN)
-./scripts/run_tests_docker.sh
-./scripts/run_tests_docker.sh --fuse-only
-./scripts/run_tests_docker.sh --cache-only
+./scripts/test_docker.sh
+./scripts/test_docker.sh --fuse-only
+./scripts/test_docker.sh --cache-only
 ```
 
 ## Architecture
@@ -95,7 +95,7 @@ Databricks Workspace APIs
 ### After Significant Changes
 ```bash
 go test ./...                    # Unit tests
-./scripts/run_tests_docker.sh   # Integration tests
+./scripts/test_docker.sh        # Integration tests
 ```
 
 ### Adding New Features
@@ -107,6 +107,6 @@ go test ./...                    # Unit tests
 ## Known Limitations
 
 - `Statfs` returns synthetic values (not actual workspace capacity)
-- atime-only updates return `ENOTSUP`
-- chmod/chown return `ENOTSUP`
+- atime-only updates on existing files return `ENOTSUP`; a brand-new empty file may receive one initial timestamp sync as a compatibility no-op
+- `chmod` is a compatibility no-op; `chown` still returns `ENOTSUP`
 - `--allow-other` enables UID-based access restriction

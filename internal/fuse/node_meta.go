@@ -211,6 +211,10 @@ func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttr
 	}
 
 	if !sizeChanged && (atimeRequested || mtimeRequested) {
+		if n.allowPostCreateTimestamps && n.openCount > 0 && !n.isDirtyLocked() && n.fileInfo.Size() == 0 {
+			n.fillAttr(ctx, &out.Attr)
+			return 0
+		}
 		return syscall.ENOTSUP
 	}
 

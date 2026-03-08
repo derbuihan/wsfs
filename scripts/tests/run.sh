@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# Test Runner for wsfs
-# Runs all integration tests on a mounted wsfs filesystem
+# Mounted test runner for wsfs.
+# Runs integration test suites against an already-mounted wsfs filesystem.
 #
 # Usage:
-#   ./run_tests.sh /path/to/mountpoint [options]
+#   ./scripts/tests/run.sh /path/to/mountpoint [options]
 #
 # Cache directory:
 #   Derived automatically from XDG_CACHE_HOME/wsfs or ~/.cache/wsfs.
@@ -18,16 +18,17 @@
 #   --skip-cache           Skip cache tests
 #   --skip-stress          Skip stress tests
 #   --skip-security        Skip security tests
+#   --help                 Show this help
 #
-# Example:
-#   ./run_tests.sh /mnt/wsfs
-#   ./run_tests.sh /mnt/wsfs --fuse-only
-#   ./run_tests.sh /mnt/wsfs --security-only
+# Examples:
+#   ./scripts/tests/run.sh /mnt/wsfs
+#   ./scripts/tests/run.sh /mnt/wsfs --fuse-only
+#   ./scripts/tests/run.sh /mnt/wsfs --security-only
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/tests/lib/test_helpers.sh"
+source "${SCRIPT_DIR}/lib/test_helpers.sh"
 
 resolve_cache_dir() {
   if [ -n "${XDG_CACHE_HOME:-}" ]; then
@@ -43,7 +44,22 @@ resolve_cache_dir() {
   echo "/tmp/wsfs-cache"
 }
 
-# Default values
+usage() {
+  awk 'NR == 1 { next } !started && /^$/ { next } /^#/ { started = 1; sub(/^# ?/, ""); print; next } started { exit }' "$0"
+}
+
+run_suite() {
+  local label="$1"
+  shift
+
+  echo "Running ${label}..."
+  echo ""
+  if ! bash "$@"; then
+    OVERALL_RESULT=1
+  fi
+  echo ""
+}
+
 MOUNT_POINT=""
 CACHE_DIR="$(resolve_cache_dir)"
 LOG_FILE="/tmp/wsfs-test.log"
@@ -52,9 +68,8 @@ RUN_CACHE=true
 RUN_STRESS=true
 RUN_SECURITY=true
 
-# Parse arguments
 while [[ $# -gt 0 ]]; do
-  case $1 in
+  case "$1" in
     --log-file=*)
       LOG_FILE="${1#*=}"
       shift
@@ -95,7 +110,11 @@ while [[ $# -gt 0 ]]; do
       RUN_SECURITY=false
       shift
       ;;
-    -*)
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    -* )
       echo "Unknown option: $1"
       exit 1
       ;;
@@ -107,17 +126,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ -z "$MOUNT_POINT" ]; then
-  echo "Usage: $0 /path/to/mountpoint [options]"
-  echo ""
-  echo "Options:"
-  echo "  --log-file=PATH        Log file (default: /tmp/wsfs-test.log)"
-  echo "  --fuse-only            Run only FUSE tests"
-  echo "  --cache-only           Run only cache tests"
-  echo "  --stress-only          Run only stress tests"
-  echo "  --security-only        Run only security tests"
-  echo "  --skip-cache           Skip cache tests"
-  echo "  --skip-stress          Skip stress tests"
-  echo "  --skip-security        Skip security tests"
+  usage
   exit 1
 fi
 
@@ -127,7 +136,7 @@ if [ ! -d "$MOUNT_POINT" ]; then
 fi
 
 echo "========================================"
-echo "wsfs Integration Test Runner"
+echo "wsfs Mounted Test Runner"
 echo "========================================"
 echo "Mount point: ${MOUNT_POINT}"
 echo "Cache directory: ${CACHE_DIR}"
@@ -141,44 +150,20 @@ echo ""
 
 OVERALL_RESULT=0
 
-# Run FUSE tests
 if [ "$RUN_FUSE" = true ]; then
-  echo "Running FUSE tests..."
-  echo ""
-  if ! bash "${SCRIPT_DIR}/tests/fuse_test.sh" "$MOUNT_POINT"; then
-    OVERALL_RESULT=1
-  fi
-  echo ""
+  run_suite "FUSE tests" "${SCRIPT_DIR}/fuse_test.sh" "$MOUNT_POINT"
 fi
 
-# Run Cache tests
 if [ "$RUN_CACHE" = true ]; then
-  echo "Running Cache tests..."
-  echo ""
-  if ! bash "${SCRIPT_DIR}/tests/cache_test.sh" "$MOUNT_POINT" "$CACHE_DIR" "$LOG_FILE"; then
-    OVERALL_RESULT=1
-  fi
-  echo ""
+  run_suite "Cache tests" "${SCRIPT_DIR}/cache_test.sh" "$MOUNT_POINT" "$CACHE_DIR" "$LOG_FILE"
 fi
 
-# Run Stress tests
 if [ "$RUN_STRESS" = true ]; then
-  echo "Running Stress tests..."
-  echo ""
-  if ! bash "${SCRIPT_DIR}/tests/stress_test.sh" "$MOUNT_POINT"; then
-    OVERALL_RESULT=1
-  fi
-  echo ""
+  run_suite "Stress tests" "${SCRIPT_DIR}/stress_test.sh" "$MOUNT_POINT"
 fi
 
-# Run Security tests
 if [ "$RUN_SECURITY" = true ]; then
-  echo "Running Security tests..."
-  echo ""
-  if ! bash "${SCRIPT_DIR}/tests/security_test.sh" "$MOUNT_POINT"; then
-    OVERALL_RESULT=1
-  fi
-  echo ""
+  run_suite "Security tests" "${SCRIPT_DIR}/security_test.sh" "$MOUNT_POINT"
 fi
 
 echo "========================================"

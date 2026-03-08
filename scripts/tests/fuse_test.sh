@@ -188,7 +188,9 @@ assert "[ $SIZE -gt 0 ]" "File size is greater than zero"
 run_cmd 'printf "touch" > touch_test.txt'
 BEFORE=$(stat_mtime touch_test.txt)
 PYTHON_BIN=$(command -v python3 || command -v python)
-assert_exit_code 0 "$PYTHON_BIN -c 'import errno, os, sys
+set +e
+"$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
+import errno, os, sys
 try:
     os.utime("touch_test.txt", None)
 except OSError as e:
@@ -196,11 +198,12 @@ except OSError as e:
     sys.exit(0 if e.errno in supported else 1)
 else:
     sys.exit(1)
-'" "os.utime on existing file returns ENOTSUP"
-set +e
+PY
+UTIME_RC=$?
 touch touch_test.txt >/dev/null 2>&1
 TOUCH_RC=$?
 set -e
+assert "[ $UTIME_RC -eq 0 ]" "os.utime on existing file returns ENOTSUP"
 assert "[ $TOUCH_RC -ne 0 ]" "touch on existing file returns error"
 AFTER=$(stat_mtime touch_test.txt)
 assert_eq "$BEFORE" "$AFTER" "touch on existing file does not change mtime"

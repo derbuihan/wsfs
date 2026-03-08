@@ -45,6 +45,8 @@
 - [x] timestamp-only `Setattr` を `ENOTSUP` に統一（`touch existing-file` / `os.utime` 系、size change 併用時は timestamp 指定を無視）
 - [x] docs/tests 整合（`docs/behavior.md` 新設、README 更新、security/cache/fuse shell test の期待値修正）
 - [x] `chmod` を互換 no-op success に変更して Git 互換改善（`git init` の lockfile 権限調整を許容、Setattr/FUSE テスト更新）
+- [x] Docker テスト導線と VSCode テスト配置を整理（`scripts/test_docker.sh` / `scripts/test_vscode_docker.sh` / `scripts/tests/run.sh` / `scripts/tests/vscode/` へ統一、README/AGENTS/CLAUDE 更新）
+- [x] `touch new-file` 互換を回復（新規空ファイルの post-create timestamp sync を no-op success に限定、FUSE `os.utime` テストの quoting も修正）
 
 ---
 
@@ -83,7 +85,7 @@
 ## 既知の制限事項
 
 - Statfs は固定値
-- atime-only 更新は ENOTSUP、`chmod` は互換 no-op success、`chown` は ENOTSUP
+- 既存ファイルへの atime-only / mtime-only 更新は ENOTSUP（新規空ファイルの初回 post-create timestamp sync のみ互換 no-op success）、`chmod` は互換 no-op success、`chown` は ENOTSUP
 - `new-files` signed URL upload は 403 の場合あり（フォールバックで対応）
 - 推奨: 単一ユーザー開発用途 / CI / ローカル編集
 - 非推奨: チーム共有サーバー / 本番運用 / 機密データ環境
