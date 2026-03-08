@@ -261,6 +261,7 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 		fileInfo:          wsInfo,
 		registry:          n.registry,
 		ownerUid:          n.ownerUid,
+		ownerGid:          n.ownerGid,
 		restrictAccess:    n.restrictAccess,
 		metadataCheckedAt: time.Now(),
 	}
@@ -340,6 +341,7 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 		buf:               fileBuffer{Data: initialContent, ReplaceOnFirstWrite: len(initialContent) > 0},
 		registry:          n.registry,
 		ownerUid:          n.ownerUid,
+		ownerGid:          n.ownerGid,
 		restrictAccess:    n.restrictAccess,
 		metadataCheckedAt: time.Now(),
 	}
@@ -428,6 +430,7 @@ func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 		fileInfo:          wsInfo,
 		registry:          n.registry,
 		ownerUid:          n.ownerUid,
+		ownerGid:          n.ownerGid,
 		restrictAccess:    n.restrictAccess,
 		metadataCheckedAt: time.Now(),
 	}
@@ -502,12 +505,11 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 		return syscall.EIO
 	}
 
-	languageChanged := notebookRenameChangesLanguage(wsInfo, newPath)
-	if languageChanged {
+	if childInode != nil && !wsInfo.IsDir() {
 		flushCtx, flushCancel := context.WithTimeout(ctx, dataOpTimeout)
 		defer flushCancel()
 		if errno := flushRenameChildIfDirty(flushCtx, childInode); errno != 0 {
-			logging.Warnf("Error flushing dirty notebook before rename %s -> %s: %v", oldPath, newPath, errno)
+			logging.Warnf("Error flushing dirty file before rename %s -> %s: %v", oldPath, newPath, errno)
 			return errno
 		}
 	}
@@ -520,17 +522,10 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 
 	actualOldPath := wsInfo.Path
 	actualNewPath := renameTargetPath(wsInfo, newPath)
-	if n.diskCache != nil && !n.diskCache.IsDisabled() {
-		if err := n.diskCache.Delete(actualOldPath); err != nil {
-			logging.Debugf("Failed to delete old path from cache %s: %v", actualOldPath, err)
-		}
-		if err := n.diskCache.Delete(actualNewPath); err != nil {
-			logging.Debugf("Failed to delete new path from cache %s: %v", actualNewPath, err)
-		}
-	}
+	n.deleteDiskCacheEntries(actualOldPath, actualNewPath)
 
 	if childInode != nil {
-		if languageChanged {
+		if !wsInfo.IsDir() {
 			refreshRenamedNode(opCtx, n.wfClient, childInode, newPath, actualNewPath)
 			notifyContentIfPossible(childInode, newPath)
 		}

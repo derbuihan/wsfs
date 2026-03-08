@@ -59,12 +59,12 @@ func TestNewRootNode(t *testing.T) {
 			return databricks.NewTestFileInfo(filePath, 0, true), nil
 		},
 	}
-	config := &NodeConfig{OwnerUid: 99, RestrictAccess: true}
+	config := &NodeConfig{OwnerUid: 99, OwnerGid: 199, RestrictAccess: true}
 	root, err := NewRootNode(api, nil, "/", NewDirtyNodeRegistry(), config)
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
-	if root.ownerUid != 99 || !root.restrictAccess {
+	if root.ownerUid != 99 || root.ownerGid != 199 || !root.restrictAccess {
 		t.Fatalf("unexpected node config: %+v", root)
 	}
 }

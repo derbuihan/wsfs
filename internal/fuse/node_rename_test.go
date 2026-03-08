@@ -369,3 +369,174 @@ func TestRenameNotebookLanguageChangeFlushFailureStopsRename(t *testing.T) {
 		t.Fatal("expected node to remain dirty after flush failure")
 	}
 }
+
+func TestRenameRegularFileFlushesDirtyBuffer(t *testing.T) {
+	const (
+		sourcePath  = "/dir/file.txt"
+		destPath    = "/dir/renamed.txt"
+		dirtySource = "dirty regular file contents\n"
+	)
+
+	renameCalled := false
+	writeCalled := false
+	remoteContents := map[string][]byte{
+		sourcePath: []byte("stale remote content\n"),
+	}
+
+	api := &databricks.FakeWorkspaceAPI{
+		WriteFunc: func(ctx context.Context, filepath string, data []byte) error {
+			writeCalled = true
+			if filepath != sourcePath {
+				t.Fatalf("unexpected write path: %s", filepath)
+			}
+			remoteContents[filepath] = append([]byte(nil), data...)
+			return nil
+		},
+		ReadAllFunc: func(ctx context.Context, filepath string) ([]byte, error) {
+			data, ok := remoteContents[filepath]
+			if !ok {
+				return nil, iofs.ErrNotExist
+			}
+			return append([]byte(nil), data...), nil
+		},
+		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			switch filePath {
+			case sourcePath:
+				if renameCalled {
+					return nil, iofs.ErrNotExist
+				}
+				return databricks.NewTestFileInfo(sourcePath, int64(len(dirtySource)), false), nil
+			case destPath:
+				if !renameCalled {
+					return nil, iofs.ErrNotExist
+				}
+				return databricks.NewTestFileInfo(destPath, int64(len(dirtySource)), false), nil
+			default:
+				return nil, iofs.ErrNotExist
+			}
+		},
+		RenameFunc: func(ctx context.Context, sourcePathArg string, destinationPath string) error {
+			if sourcePathArg != sourcePath || destinationPath != destPath {
+				t.Fatalf("unexpected rename: %s -> %s", sourcePathArg, destinationPath)
+			}
+			if got := string(remoteContents[sourcePath]); got != dirtySource {
+				t.Fatalf("expected flushed content before rename, got %q", got)
+			}
+			renameCalled = true
+			remoteContents[destPath] = append([]byte(nil), remoteContents[sourcePath]...)
+			delete(remoteContents, sourcePath)
+			return nil
+		},
+	}
+
+	root := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeDirectory,
+			Path:       "/dir",
+		}},
+	}
+
+	fs.NewNodeFS(root, &fs.Options{})
+	ctx := context.Background()
+
+	fileNode := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       sourcePath,
+			Size:       int64(len(dirtySource)),
+		}},
+		buf: fileBuffer{
+			Data:           []byte(dirtySource),
+			CachedPath:     "/tmp/stale-cache",
+			CachedChecksum: "deadbeef",
+		},
+		openCount: 1,
+	}
+	fileNode.markDirtyLocked(dirtyData)
+	fileInode := root.NewPersistentInode(ctx, fileNode, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno(fileNode.fileInfo)})
+	root.AddChild("file.txt", fileInode, false)
+
+	if errno := root.Rename(ctx, "file.txt", root, "renamed.txt", 0); errno != 0 {
+		t.Fatalf("Rename failed with errno: %d", errno)
+	}
+	if !writeCalled {
+		t.Fatal("expected dirty regular file to flush before rename")
+	}
+	if got := fileNode.fileInfo.Path; got != destPath {
+		t.Fatalf("expected path %q after rename, got %q", destPath, got)
+	}
+	if fileNode.isDirtyLocked() {
+		t.Fatal("expected node to be clean after rename refresh")
+	}
+	if fileNode.buf.Data != nil {
+		t.Fatalf("expected clean buffer invalidated after rename, got %q", string(fileNode.buf.Data))
+	}
+	if fileNode.buf.CachedPath != "" || fileNode.buf.CachedChecksum != "" {
+		t.Fatalf("expected cached file metadata cleared, got path=%q checksum=%q", fileNode.buf.CachedPath, fileNode.buf.CachedChecksum)
+	}
+	if got := readNodeText(t, fileNode); got != dirtySource {
+		t.Fatalf("unexpected content after rename: %q", got)
+	}
+}
+
+func TestRenameRegularFileFlushFailureStopsRename(t *testing.T) {
+	renameCalled := false
+
+	api := &databricks.FakeWorkspaceAPI{
+		WriteFunc: func(ctx context.Context, filepath string, data []byte) error {
+			return iofs.ErrPermission
+		},
+		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			switch filePath {
+			case "/dir/file.txt":
+				return databricks.NewTestFileInfo("/dir/file.txt", 5, false), nil
+			default:
+				return nil, iofs.ErrNotExist
+			}
+		},
+		RenameFunc: func(ctx context.Context, sourcePath string, destinationPath string) error {
+			renameCalled = true
+			return nil
+		},
+	}
+
+	root := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeDirectory,
+			Path:       "/dir",
+		}},
+	}
+
+	fs.NewNodeFS(root, &fs.Options{})
+	ctx := context.Background()
+
+	fileNode := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/dir/file.txt",
+			Size:       5,
+		}},
+		buf:       fileBuffer{Data: []byte("dirty")},
+		openCount: 1,
+	}
+	fileNode.markDirtyLocked(dirtyData)
+	fileInode := root.NewPersistentInode(ctx, fileNode, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno(fileNode.fileInfo)})
+	root.AddChild("file.txt", fileInode, false)
+
+	if errno := root.Rename(ctx, "file.txt", root, "renamed.txt", 0); errno != syscall.EACCES {
+		t.Fatalf("expected EACCES, got %d", errno)
+	}
+	if renameCalled {
+		t.Fatal("expected rename to stop before remote rename call")
+	}
+	if !fileNode.isDirtyLocked() {
+		t.Fatal("expected node to remain dirty after flush failure")
+	}
+	if got := fileNode.fileInfo.Path; got != "/dir/file.txt" {
+		t.Fatalf("expected source path to remain unchanged, got %q", got)
+	}
+}

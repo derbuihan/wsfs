@@ -169,55 +169,47 @@ print_section "Section 3: Remote Synchronization"
 
 # This section requires DATABRICKS_HOST and DATABRICKS_TOKEN
 if [ -n "${DATABRICKS_HOST:-}" ] && [ -n "${DATABRICKS_TOKEN:-}" ]; then
-  # Ensure DATABRICKS_HOST has https:// prefix
-  if [[ ! "$DATABRICKS_HOST" =~ ^https?:// ]]; then
-    DATABRICKS_HOST="https://${DATABRICKS_HOST}"
+  HOST="${DATABRICKS_HOST}"
+  if [[ ! "$HOST" =~ ^https?:// ]]; then
+    HOST="https://${HOST}"
   fi
 
   WORKSPACE_PATH=$(pwd | sed "s|^${MOUNT_POINT}||")
+  REMOTE_FILE_PATH="${WORKSPACE_PATH}/sync_test1.txt"
   echo "Workspace path: ${WORKSPACE_PATH}"
 
-  # Create a file locally
   echo "Creating file locally..."
   echo "original content" > sync_test1.txt
   ORIGINAL=$(cat sync_test1.txt)
   assert_eq "original content" "$ORIGINAL" "Original content created"
 
-  # Wait for file to be uploaded and cached
   sleep 2
 
-  # Modify via Databricks API
-  echo "Modifying file remotely via API..."
-  NEW_CONTENT="remotely modified content"
-  API_PATH="/api/2.0/workspace-files/import-file${WORKSPACE_PATH}/sync_test1.txt?overwrite=true"
+  echo "Modifying file remotely via workspace-files/import-file API..."
+  NEW_CONTENT="remotely modified content $(date +%s)"
+  API_PATH="/api/2.0/workspace-files/import-file${REMOTE_FILE_PATH}?overwrite=true"
 
-  RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-    "${DATABRICKS_HOST}${API_PATH}" \
-    -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
-    -H "Content-Type: application/octet-stream" \
-    -d "$NEW_CONTENT")
+  RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST     "${HOST}${API_PATH}"     -H "Authorization: Bearer ${DATABRICKS_TOKEN}"     -H "Content-Type: application/octet-stream"     --data-binary "$NEW_CONTENT")
 
   HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-
-  if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-    echo -e "${GREEN}✓${NC} File modified via API (HTTP $HTTP_CODE)"
-
-    sleep 2
-
-    # Read the file again
-    echo "Reading file again (should get new content)..."
-    UPDATED=$(cat sync_test1.txt)
-
-    if [ "$UPDATED" = "remotely modified content" ]; then
-      echo -e "${GREEN}✓ PASS:${NC} Cache correctly detected remote modification"
-      ((TEST_PASSED++)) || true
-    elif [ "$UPDATED" = "original content" ]; then
-      echo -e "${YELLOW}⊘ INFO:${NC} Cache did not detect remote modification yet (may still be within the metadata TTL window)"
-    else
-      echo -e "${YELLOW}⊘ INFO:${NC} Unexpected content: '$UPDATED'"
-    fi
+  if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+    echo -e "${RED}✗ FAIL:${NC} Remote overwrite API failed (HTTP $HTTP_CODE)"
+    echo "$RESPONSE" | sed '$d'
+    ((TEST_FAILED++)) || true
   else
-    echo -e "${YELLOW}⊘ SKIP:${NC} API call failed (HTTP $HTTP_CODE)"
+    echo -e "${GREEN}✓ PASS:${NC} Remote overwrite API succeeded (HTTP $HTTP_CODE)"
+    ((TEST_PASSED++)) || true
+
+    UPDATED=""
+    for attempt in $(seq 1 15); do
+      UPDATED=$(cat sync_test1.txt)
+      if [ "$UPDATED" = "$NEW_CONTENT" ]; then
+        break
+      fi
+      sleep 1
+    done
+
+    assert_eq "$NEW_CONTENT" "$UPDATED" "Reopen/read observes out-of-band remote overwrite without waiting for cache TTL expiry"
   fi
 else
   skip_test "DATABRICKS_HOST/TOKEN not set, skipping remote sync tests"

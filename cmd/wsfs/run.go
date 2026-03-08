@@ -138,9 +138,10 @@ func validateConfig(cfg cliConfig) error {
 	return nil
 }
 
-func buildNodeConfig(ownerUid uint32, allowOther bool) *wsfsfuse.NodeConfig {
+func buildNodeConfig(ownerUid uint32, ownerGid uint32, allowOther bool) *wsfsfuse.NodeConfig {
 	return &wsfsfuse.NodeConfig{
 		OwnerUid:       ownerUid,
+		OwnerGid:       ownerGid,
 		RestrictAccess: !allowOther,
 	}
 }
@@ -227,10 +228,14 @@ func run(args []string, deps runDeps) error {
 	if err != nil {
 		return fmt.Errorf("Failed to parse UID: %w", err)
 	}
+	ownerGid, err := strconv.ParseUint(currentUser.Gid, 10, 32)
+	if err != nil {
+		return fmt.Errorf("Failed to parse GID: %w", err)
+	}
 
-	// Create node config for access control
-	// When --allow-other is enabled, restrict access to mount owner only
-	nodeConfig := buildNodeConfig(uint32(ownerUid), cfg.allowOther)
+	// Create node config for access control.
+	// Without --allow-other only the mount owner can access the filesystem.
+	nodeConfig := buildNodeConfig(uint32(ownerUid), uint32(ownerGid), cfg.allowOther)
 	if cfg.allowOther {
 		logging.Infof("allow-other enabled: all local users can access the mount")
 	} else {

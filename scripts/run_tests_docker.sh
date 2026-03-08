@@ -155,11 +155,11 @@ if [ "$RUN_MAIN" = true ]; then
   " || OVERALL_RESULT=1
 fi
 
-# Stage 2: Run security tests (requires --allow-other mount)
+# Stage 2: Run allow-other exposure tests (requires --allow-other mount)
 if [ "$RUN_SECURITY" = true ]; then
   echo ""
   echo "========================================"
-  echo "Stage 2: Security Tests (with --allow-other)"
+  echo "Stage 2: Allow-Other Exposure Tests"
   echo "========================================"
 
   $DOCKER_RUN wsfs-test bash -c "
@@ -175,7 +175,7 @@ if [ "$RUN_SECURITY" = true ]; then
     CACHE_DIR=\"\${XDG_CACHE_HOME}/wsfs\"
     mkdir -p /mnt/wsfs \"\$CACHE_DIR\"
 
-    # Mount with --allow-other for security tests
+    # Mount with --allow-other for exposure validation
     echo 'Mounting wsfs with --allow-other...'
     echo "Using cache directory: \$CACHE_DIR"
     /tmp/wsfs --debug --allow-other /mnt/wsfs > /tmp/wsfs.log 2>&1 &

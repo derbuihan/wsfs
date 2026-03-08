@@ -15,25 +15,28 @@ A FUSE-based file system to interact with Databricks workspace files and directo
 - [x] Expose Databricks notebooks as source files (`.py`, `.sql`, `.scala`, `.R`) based on notebook language.
 
 Notes:
-- `Setattr` currently supports size changes (truncate) and mtime updates. atime-only updates return ENOTSUP. chmod/chown also return ENOTSUP.
+- `Setattr` supports size changes. Timestamp-only updates on existing files (`atime`, `mtime`, or both) return `ENOTSUP`. `chmod`/`chown` also return `ENOTSUP`.
 - Vim saves are verified in the test suite.
 - Notebooks are shown as source files by default. `.ipynb` appears only as a fallback when the preferred source name collides with an exact workspace entry or when notebook language is unknown.
 
 ## Current behavior & limitations
 
-- Permissions are not enforced; `Access` currently allows all callers.
+- Without `--allow-other`, the mount is owner-only. With `--allow-other`, other local users can access the mount through the same Databricks token.
+- `stat(2)` reports the mount owner's UID/GID and synthetic mode bits (`0644` files, `0755` directories).
 - `Statfs` returns synthetic but stable values.
-- `Open` with write/truncate uses direct I/O; reads use the in-memory buffer after first fetch.
-- `Flush/Fsync/Release` write back dirty buffers; `Release` also drops the in-memory buffer.
-- atime-only updates are ENOTSUP; chmod/chown are ENOTSUP.
+- Read-only opens on clean regular files revalidate remote metadata and drop stale clean cache state when the remote file changed.
+- `Flush`/`Fsync`/`Release` write back dirty buffers; `Release` also drops clean in-memory buffers after the last close.
 - Creating `foo.py` creates a Python notebook named `foo` in Databricks. Creating `foo.ipynb` creates a regular workspace file named `foo.ipynb`.
 
 Behavior details: see `docs/behavior.md`.
 
 ## Usage
 
-1. Install FUSE on your system if you haven't already.
-2. Set the `DATABRICKS_HOST` and `DATABRICKS_TOKEN` environment variables with your Databricks workspace URL and personal access token.
+For source-checkout development, use the Docker shell wrapper on both macOS and Linux.
+This is the recommended path because it avoids host-side direct-run drift.
+
+1. Install Docker with Compose support.
+2. Create a `.env` file with your Databricks workspace URL and token.
 
 ```bash
 $ cat .env
@@ -41,24 +44,39 @@ export DATABRICKS_HOST=<your-databricks-workspace-url>
 export DATABRICKS_TOKEN=<your-personal-access-token>
 ```
 
-3. Run the application with the desired mount point (manual runs expect `.env` in the repo root).
+3. Start a Docker shell with `wsfs` mounted inside the container at `/mnt/wsfs`.
 
 ```bash
-$ source .env
-$ go build -o wsfs
-$ ./wsfs <mount-point>
+$ ./scripts/run_wsfs_docker.sh
 ```
 
-4. Access your Databricks workspace files through the mount point.
+4. Work with the mounted files inside that shell.
 
 ```bash
-$ cd <mount-point>
-$ ls
+root@container:/mnt/wsfs$ ls
 Repos  Shared  Users
 
-$ ls Users/user@example.com
+root@container:/mnt/wsfs$ ls Users/user@example.com
 analysis.py  dashboard.sql  regular-file.txt
 ```
+
+Useful variants:
+
+```bash
+# Enable debug logging
+./scripts/run_wsfs_docker.sh --debug
+
+# Mount a specific Databricks path
+./scripts/run_wsfs_docker.sh --remote-path=/Users/user@example.com
+
+# Run a single command instead of opening a shell
+./scripts/run_wsfs_docker.sh -- 'find /mnt/wsfs -maxdepth 2 -type f | head'
+```
+
+Notes:
+- The FUSE mount is inside the container, not directly on the host filesystem.
+- This works consistently for macOS and Linux development machines.
+- For host-integrated installs, prefer the packaged `.deb` + systemd flow below.
 
 ## Debian/Ubuntu (.deb)
 
@@ -139,22 +157,25 @@ wsfs always uses two cache layers:
 - A metadata cache for directory listings, lookups, and short-lived negative entries
 - A disk-backed content cache for file reads
 
-There are no cache tuning flags. The goal is that `./wsfs <mount-point>` is enough for normal use.
+There are no cache tuning flags. The goal is that `./scripts/run_wsfs_docker.sh` is enough for normal development use.
 
 ### Cache Behavior
 
-- Directory metadata is reused for short TTL windows so shells and editors do not re-fetch the same listings on every open.
+- Directory metadata is reused for short TTL windows so shells and editors do not re-fetch the same listings on every lookup.
+- Clean regular files are revalidated against remote metadata on read-only open.
+- If remote metadata changed, wsfs drops the clean buffer, invalidates related metadata/content cache state, and avoids stale kernel page-cache reuse for that open.
 - File contents are cached on disk after the first read and reused until the entry is invalidated or evicted.
+- Missing or corrupt disk cache files are invalidated and retried from Databricks once instead of immediately surfacing `EIO`.
 - Local write, rename, delete, and mkdir/rmdir paths invalidate related metadata and content cache entries.
 - Disk cache entries are stored under `$XDG_CACHE_HOME/wsfs`, or `~/.cache/wsfs` when `XDG_CACHE_HOME` is unset.
 - Cache directory permissions are `0700`; cache files are `0600`.
 
 ### Cache Monitoring
 
-When running with `--debug`, cache activity is logged:
+When running with `--debug`, cache activity is logged inside the Docker shell session:
 
 ```bash
-$ ./wsfs --debug <mount-point>
+$ ./scripts/run_wsfs_docker.sh --debug
 # Look for log messages such as:
 # - "Cache hit for /path/to/file"
 # - "Cache miss for /path/to/file, fetching from remote"
@@ -171,32 +192,37 @@ wsfs includes comprehensive test suites covering FUSE operations, caching behavi
 # Go unit tests (no .env required)
 go test ./...
 
-# Integration tests via Docker (Mac)
+# Open a Docker shell with wsfs mounted inside the container
+./scripts/run_wsfs_docker.sh
+
+# Integration tests via Docker (macOS and Linux)
 ./scripts/run_tests_docker.sh
 
 # VSCode integration tests via Docker (Core dev loop)
 ./scripts/run_vscode_tests_docker.sh
-
-# Integration tests on Linux (requires mounted wsfs)
-./scripts/run_tests.sh /mnt/wsfs
 ```
 
 **Prerequisites:**
 - Set `DATABRICKS_HOST` and `DATABRICKS_TOKEN` in `.env` file
-- Docker with FUSE support (for Mac)
+- Docker with Compose support and FUSE-capable privileged containers
 
 ### Test Suites
 
 | Suite | Script | Description |
 |-------|--------|-------------|
-| **FUSE tests** | `scripts/tests/fuse_test.sh` | File/directory operations, vim compatibility |
-| **Cache tests** | `scripts/tests/cache_test.sh` | Default cache population, invalidation, remote refresh checks |
+| **FUSE tests** | `scripts/tests/fuse_test.sh` | File/directory operations, vim compatibility, timestamp-only `Setattr` expectations |
+| **Cache tests** | `scripts/tests/cache_test.sh` | Default cache population, invalidation, and out-of-band remote refresh checks |
 | **Stress tests** | `scripts/tests/stress_test.sh` | Concurrent access, rapid truncate, rename |
+| **Security / allow-other** | `scripts/tests/security_test.sh` | Validates `--allow-other` exposure semantics with a second local user |
+| **Docker shell** | `scripts/run_wsfs_docker.sh` | Opens a shell with wsfs mounted inside the container for macOS/Linux development |
 | **VSCode core dev loop** | `scripts/run_vscode_tests_docker.sh` | One VSCode session covering edit/save/search/rename/terminal/Python run |
 
 ### Test Options
 
 ```bash
+# Open an interactive shell with wsfs mounted inside Docker
+./scripts/run_wsfs_docker.sh
+
 # Run specific test suite
 ./scripts/run_tests_docker.sh --fuse-only
 ./scripts/run_tests_docker.sh --cache-only
@@ -207,12 +233,13 @@ go test ./...
 
 # Rebuild Docker image
 ./scripts/run_tests_docker.sh --build
+./scripts/run_wsfs_docker.sh --build
 ```
 
 ### Debug Logging
 
 ```bash
-./wsfs --debug /mnt/wsfs
+./scripts/run_wsfs_docker.sh --debug
 # Look for:
 # - "Cache hit for /path/to/file"
 # - "Cache miss for /path/to/file, fetching from remote"

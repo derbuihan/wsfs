@@ -35,6 +35,16 @@
 - [x] zero-config cache へ移行（legacy cache CLI 廃止、always-on metadata/dir cache、default disk cache、singleflight、Open の lazy read、cache テスト更新）
 - [x] legacy cache option cleanup（systemd/maintainer docs/CLI テストから stale 参照を削除）
 
+## 完了（2026-03-08）
+
+- [x] ソース checkout の実行導線を Docker shell に統一（`scripts/run_wsfs_docker.sh` 追加、AGENTS/README から direct-run 導線を削除、macOS/Linux の案内を統一）
+- [x] Open 時の freshness 強化（clean な通常ファイルを read-only open でリモート再検証、変更検知時は clean buffer / metadata cache / disk cache を無効化し `DIRECT_IO` を返す）
+- [x] ディスクキャッシュ hardening（checksum 追跡、missing/corrupt cache の invalidate + remote retry、mutation 前の整合チェック）
+- [x] dirty な通常ファイル rename 安全化（backend rename 前の pre-flush、失敗時 abort、rename 後 refresh で clean/cache state をクリア）
+- [x] stat の owner 表示を mount owner UID/GID に固定（`NodeConfig.OwnerGid` 追加、caller 依存の `stat` を廃止）
+- [x] timestamp-only `Setattr` を `ENOTSUP` に統一（`touch existing-file` / `os.utime` 系、size change 併用時は timestamp 指定を無視）
+- [x] docs/tests 整合（`docs/behavior.md` 新設、README 更新、security/cache/fuse shell test の期待値修正）
+
 ---
 
 ## 未対応（オプション）
@@ -64,9 +74,7 @@
 ## 未解決の課題（要検証）
 
 - [ ] 同一ファイルへの並列書き込みの競合（last-write-wins）
-- [ ] Open時のリモート更新チェックで古いデータが返る可能性
 - [ ] メタキャッシュのstale read（Write後、TTL内のStatが古い可能性）
-- [ ] ディスクキャッシュのTOCTOU
 - [ ] Release失敗時のdirtyバッファ保持（メモリ解放遅延）
 
 ---

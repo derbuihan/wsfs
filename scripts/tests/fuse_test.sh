@@ -184,13 +184,28 @@ assert "[ $? -eq 0 ]" "stat command works on file"
 SIZE=$(stat_size metafile.txt)
 assert "[ $SIZE -gt 0 ]" "File size is greater than zero"
 
-# touch mtime update
+# timestamp-only update on existing file (expected ENOTSUP)
 run_cmd 'printf "touch" > touch_test.txt'
 BEFORE=$(stat_mtime touch_test.txt)
-sleep 1
-run_cmd 'touch touch_test.txt'
+PYTHON_BIN=$(command -v python3 || command -v python)
+assert_exit_code 0 "$PYTHON_BIN -c 'import errno, os, sys
+try:
+    os.utime("touch_test.txt", None)
+except OSError as e:
+    supported = {errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}
+    sys.exit(0 if e.errno in supported else 1)
+else:
+    sys.exit(1)
+'" "os.utime on existing file returns ENOTSUP"
+set +e
+touch touch_test.txt >/dev/null 2>&1
+TOUCH_RC=$?
+set -e
+assert "[ $TOUCH_RC -ne 0 ]" "touch on existing file returns error"
 AFTER=$(stat_mtime touch_test.txt)
-assert "[ $AFTER -gt $BEFORE ]" "touch updates mtime"
+assert_eq "$BEFORE" "$AFTER" "touch on existing file does not change mtime"
+CONTENT=$(cat touch_test.txt)
+assert_eq "touch" "$CONTENT" "timestamp-only update does not modify file content"
 
 # chmod (expected to fail - not supported)
 run_cmd 'printf "perm" > perm.txt'

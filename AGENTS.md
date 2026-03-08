@@ -6,7 +6,7 @@ AI coding agent guidance for this repo.
 1. Confirm `Task.md` and select the task to work on.
 2. Implement the task.
 3. Run tests to confirm no regression.
-   - Always run `scripts/tests/fuse_test.sh` after implementation. If it fails, fix the failing part.
+   - Always run the FUSE test suite after implementation (normally `./scripts/run_tests_docker.sh --fuse-only`). If it fails, fix the failing part.
 4. Update `Task.md` when progress changes.
 
 ## Project overview
@@ -19,8 +19,8 @@ Key entry points:
 - `scripts/fuse_test.sh`: Filesystem integration tests.
 
 ## Current behavior notes
-- `Setattr` supports size changes (truncate) and mtime updates; mode/uid/gid are ENOTSUP.
-- atime-only updates are ENOTSUP; combined mtime+atime (e.g., `touch`) works.
+- `Setattr` supports size changes (truncate); timestamp-only updates on existing files return `ENOTSUP`.
+- mode/uid/gid changes are `ENOTSUP`.
 - Stable inode IDs are derived from Databricks `ObjectId`/`ResourceId`/`Path` to avoid editor save errors.
 - Vim save paths (default/backup/swap) are validated in `scripts/fuse_test.sh`.
 
@@ -32,25 +32,28 @@ Required env vars (do not commit secrets):
 Local `.env` is expected for development, but must never be committed.
 
 ## Build & run
-Build:
+Use the Docker shell wrapper for source-checkout development on both macOS and Linux.
+The wsfs mount lives inside the container shell, not on the host filesystem.
+
+Open an interactive shell with wsfs mounted at `/mnt/wsfs`:
 ```bash
-go build -o wsfs
+./scripts/run_wsfs_docker.sh
 ```
 
-Run:
+Open the same shell with debug logging enabled:
 ```bash
-./wsfs <mount-point>
+./scripts/run_wsfs_docker.sh --debug
 ```
 
-Debug:
+Run one command inside the mounted container instead of an interactive shell:
 ```bash
-./wsfs -debug <mount-point>
+./scripts/run_wsfs_docker.sh -- 'ls -la /mnt/wsfs'
 ```
 
 ## Tests
-Docker (macOS recommended):
+Docker (recommended on macOS and Linux):
 ```bash
-docker compose run --rm --build wsfs-test
+./scripts/run_tests_docker.sh
 ```
 
 Debugging failing shell tests (Docker):
@@ -76,18 +79,6 @@ docker compose run --rm wsfs-test bash -c '
 ```
 - When needed, replace `./scripts/tests/fuse_test.sh /mnt/wsfs` with a smaller failing script or a minimal inline repro to narrow down the root cause.
 
-Linux (direct):
-```bash
-sudo apt-get update
-sudo apt-get install -y fuse3
-sudo apt-get install -y vim
-echo 'user_allow_other' | sudo tee -a /etc/fuse.conf
-mkdir -p /mnt/wsfs
-go build -o tmp/wsfs
-./tmp/wsfs /mnt/wsfs &
-./scripts/tests/fuse_test.sh /mnt/wsfs
-fusermount3 -u /mnt/wsfs
-```
 
 ## Coding conventions
 - Keep changes small and focused.

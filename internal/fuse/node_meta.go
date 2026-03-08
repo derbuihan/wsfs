@@ -14,15 +14,23 @@ import (
 	"wsfs/internal/logging"
 )
 
-func (n *WSNode) refreshMetadataIfNeededLocked(ctx context.Context) syscall.Errno {
+func fileInfoChanged(oldInfo, newInfo databricks.WSFileInfo) bool {
+	return oldInfo.ModifiedAt != newInfo.ModifiedAt ||
+		oldInfo.Size() != newInfo.Size() ||
+		oldInfo.ObjectId != newInfo.ObjectId ||
+		oldInfo.ResourceId != newInfo.ResourceId ||
+		oldInfo.Path != newInfo.Path
+}
+
+func (n *WSNode) refreshMetadataLocked(ctx context.Context, bypassCache bool) (bool, syscall.Errno) {
 	if n.isDirtyLocked() {
-		return 0
+		return false, 0
 	}
 	if n.wfClient == nil {
 		if n.metadataCheckedAt.IsZero() {
 			n.metadataCheckedAt = time.Now()
 		}
-		return 0
+		return false, 0
 	}
 
 	ttl := n.wfClient.MetadataTTL()
@@ -30,39 +38,47 @@ func (n *WSNode) refreshMetadataIfNeededLocked(ctx context.Context) syscall.Errn
 		ttl = time.Second
 	}
 	if n.metadataCheckedAt.IsZero() {
-		n.metadataCheckedAt = time.Now()
-		return 0
+		if !bypassCache {
+			n.metadataCheckedAt = time.Now()
+			return false, 0
+		}
 	}
-	if !n.metadataCheckedAt.IsZero() && time.Since(n.metadataCheckedAt) < ttl {
-		return 0
+	if !bypassCache && !n.metadataCheckedAt.IsZero() && time.Since(n.metadataCheckedAt) < ttl {
+		return false, 0
+	}
+	if bypassCache {
+		n.wfClient.CacheInvalidate(n.Path())
 	}
 
 	info, err := n.wfClient.Stat(ctx, n.Path())
 	if err != nil {
 		if errors.Is(err, iofs.ErrNotExist) {
-			return syscall.ENOENT
+			return false, syscall.ENOENT
 		}
-		return errnoFromBackendError(backendOpLookup, err)
+		return false, errnoFromBackendError(backendOpLookup, err)
 	}
 
 	wsInfo, ok := info.(databricks.WSFileInfo)
 	if !ok {
 		logging.Debugf("refreshMetadata: unexpected file info type for %s", n.Path())
-		return syscall.EIO
+		return false, syscall.EIO
 	}
 
-	if wsInfo.ModTime().After(n.fileInfo.ModTime()) {
+	changed := fileInfoChanged(n.fileInfo, wsInfo)
+	if changed {
+		oldPath := n.fileInfo.Path
 		n.clearCleanBufferLocked()
-		if n.diskCache != nil && !n.diskCache.IsDisabled() {
-			if err := n.diskCache.Delete(n.fileInfo.Path); err != nil {
-				logging.Debugf("refreshMetadata: failed to delete cache for %s: %v", n.fileInfo.Path, err)
-			}
-		}
+		n.deleteDiskCacheEntries(oldPath, wsInfo.Path)
 	}
 
 	n.fileInfo = wsInfo
 	n.metadataCheckedAt = time.Now()
-	return 0
+	return changed, 0
+}
+
+func (n *WSNode) refreshMetadataIfNeededLocked(ctx context.Context) syscall.Errno {
+	_, errno := n.refreshMetadataLocked(ctx, false)
+	return errno
 }
 
 func (n *WSNode) fillAttr(ctx context.Context, out *fuse.Attr) {
@@ -88,12 +104,9 @@ func (n *WSNode) fillAttr(ctx context.Context, out *fuse.Attr) {
 	out.Atime = out.Mtime
 	out.Ctime = out.Mtime
 
-	// UID/GID
-	caller, ok := fuse.FromContext(ctx)
-	if ok {
-		out.Uid = caller.Uid
-		out.Gid = caller.Gid
-	}
+	// UID/GID are stable and reflect the mount owner, not the current caller.
+	out.Uid = n.ownerUid
+	out.Gid = n.ownerGid
 }
 
 func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -173,11 +186,11 @@ func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttr
 	if _, ok := in.GetGID(); ok {
 		return syscall.ENOTSUP
 	}
-	var mtime *time.Time
 	sizeChanged := false
+	mtimeRequested := false
 	atimeRequested := false
-	if t, ok := in.GetMTime(); ok {
-		mtime = &t
+	if _, ok := in.GetMTime(); ok {
+		mtimeRequested = true
 	}
 	if _, ok := in.GetATime(); ok {
 		atimeRequested = true
@@ -188,24 +201,20 @@ func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttr
 			return syscall.EISDIR
 		}
 		if size > 0 && n.buf.Data == nil {
-			if errno := n.ensureDataLocked(ctx); errno != 0 {
+			if errno := n.ensureDataForMutationLocked(ctx); errno != 0 {
 				return errno
 			}
 		}
 		n.truncateLocked(size)
 		sizeChanged = true
-		if mtime == nil {
-			now := time.Now()
-			mtime = &now
-		}
 	}
 
-	if atimeRequested && mtime == nil && !sizeChanged {
+	if !sizeChanged && (atimeRequested || mtimeRequested) {
 		return syscall.ENOTSUP
 	}
 
-	if mtime != nil {
-		n.markModifiedLocked(*mtime)
+	if sizeChanged {
+		n.markModifiedLocked(time.Now())
 		n.metadataCheckedAt = time.Now()
 	}
 
@@ -219,8 +228,6 @@ func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttr
 				return errno
 			}
 		}
-	} else if mtime != nil {
-		n.wfClient.CacheSet(n.Path(), n.fileInfo)
 	}
 
 	n.fillAttr(ctx, &out.Attr)

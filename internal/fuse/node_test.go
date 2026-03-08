@@ -541,6 +541,53 @@ func TestWSNodeSetattr(t *testing.T) {
 	}
 }
 
+func TestWSNodeSetattrRejectsTimestampOnly(t *testing.T) {
+	n := &WSNode{
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+			Size:       12,
+		}},
+	}
+
+	testCases := []struct {
+		name string
+		in   *fuse.SetAttrIn
+	}{
+		{
+			name: "mtime only",
+			in: &fuse.SetAttrIn{SetAttrInCommon: fuse.SetAttrInCommon{
+				Valid: fuse.FATTR_MTIME,
+				Mtime: uint64(time.Now().Unix()),
+			}},
+		},
+		{
+			name: "atime only",
+			in: &fuse.SetAttrIn{SetAttrInCommon: fuse.SetAttrInCommon{
+				Valid: fuse.FATTR_ATIME,
+				Atime: uint64(time.Now().Unix()),
+			}},
+		},
+		{
+			name: "atime and mtime",
+			in: &fuse.SetAttrIn{SetAttrInCommon: fuse.SetAttrInCommon{
+				Valid: fuse.FATTR_ATIME | fuse.FATTR_MTIME,
+				Atime: uint64(time.Now().Unix()),
+				Mtime: uint64(time.Now().Unix()),
+			}},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := &fuse.AttrOut{}
+			if errno := n.Setattr(context.Background(), nil, tc.in, out); errno != syscall.ENOTSUP {
+				t.Fatalf("expected ENOTSUP, got %d", errno)
+			}
+		})
+	}
+}
+
 // TestSetattrTruncateWithoutOpenFlushes ensures truncate without open handle flushes immediately.
 func TestSetattrTruncateWithoutOpenFlushes(t *testing.T) {
 	var writeCalls int
@@ -627,6 +674,27 @@ func TestWSNodeGetattrDirectory(t *testing.T) {
 	}
 }
 
+func TestWSNodeGetattrUsesMountOwnerIDs(t *testing.T) {
+	n := &WSNode{
+		ownerUid: 123,
+		ownerGid: 456,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/owned.txt",
+			Size:       7,
+			ModifiedAt: time.Now().UnixMilli(),
+		}},
+	}
+
+	out := &fuse.AttrOut{}
+	if errno := n.Getattr(context.Background(), nil, out); errno != 0 {
+		t.Fatalf("Getattr failed with errno: %d", errno)
+	}
+	if out.Uid != 123 || out.Gid != 456 {
+		t.Fatalf("expected uid/gid 123/456, got %d/%d", out.Uid, out.Gid)
+	}
+}
+
 // TestWSNodeAccess tests Access without restriction (allow all)
 func TestWSNodeAccess(t *testing.T) {
 	n := &WSNode{
@@ -655,6 +723,7 @@ func TestWSNodeAccessRestricted(t *testing.T) {
 			Path:       "/test.txt",
 		}},
 		ownerUid:       1000,
+		ownerGid:       1001,
 		restrictAccess: true, // Access control enabled
 	}
 
@@ -670,17 +739,22 @@ func TestWSNodeAccessRestricted(t *testing.T) {
 func TestWSNodeAccessRestrictedInheritance(t *testing.T) {
 	parent := &WSNode{
 		ownerUid:       1000,
+		ownerGid:       1001,
 		restrictAccess: true,
 	}
 
 	// Simulate child node creation pattern
 	child := &WSNode{
 		ownerUid:       parent.ownerUid,
+		ownerGid:       parent.ownerGid,
 		restrictAccess: parent.restrictAccess,
 	}
 
 	if child.ownerUid != parent.ownerUid {
 		t.Errorf("Child ownerUid %d != parent ownerUid %d", child.ownerUid, parent.ownerUid)
+	}
+	if child.ownerGid != parent.ownerGid {
+		t.Errorf("Child ownerGid %d != parent ownerGid %d", child.ownerGid, parent.ownerGid)
 	}
 	if child.restrictAccess != parent.restrictAccess {
 		t.Errorf("Child restrictAccess %v != parent restrictAccess %v", child.restrictAccess, parent.restrictAccess)
@@ -926,9 +1000,12 @@ func TestOpenDetectsRemoteModification(t *testing.T) {
 		metadataCheckedAt: time.Now().Add(-2 * time.Second),
 	}
 
-	_, _, errno := n.Open(context.Background(), 0)
+	_, openFlags, errno := n.Open(context.Background(), 0)
 	if errno != 0 {
 		t.Fatalf("Open failed with errno: %d", errno)
+	}
+	if openFlags&fuse.FOPEN_DIRECT_IO == 0 {
+		t.Fatalf("expected DIRECT_IO after remote metadata change, got flags=%d", openFlags)
 	}
 
 	if n.buf.Data != nil {
@@ -1035,9 +1112,12 @@ func TestOpenNoChangeWhenRemoteNotModified(t *testing.T) {
 		metadataCheckedAt: time.Now().Add(-2 * time.Second),
 	}
 
-	_, _, errno := n.Open(context.Background(), 0)
+	_, openFlags, errno := n.Open(context.Background(), 0)
 	if errno != 0 {
 		t.Fatalf("Open failed with errno: %d", errno)
+	}
+	if openFlags&fuse.FOPEN_KEEP_CACHE == 0 {
+		t.Fatalf("expected KEEP_CACHE when metadata is unchanged, got flags=%d", openFlags)
 	}
 
 	// Buffer should still have original data
@@ -1053,7 +1133,16 @@ func TestOpenNoChangeWhenRemoteNotModified(t *testing.T) {
 
 func TestOpenReadOnlyDefersRemoteRead(t *testing.T) {
 	readAllCalls := 0
+	modTime := time.Now()
 	api := &databricks.FakeWorkspaceAPI{
+		StatFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			return databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+				ObjectType: workspace.ObjectTypeFile,
+				Path:       "/test.txt",
+				Size:       5,
+				ModifiedAt: modTime.UnixMilli(),
+			}}, nil
+		},
 		ReadAllFunc: func(ctx context.Context, filePath string) ([]byte, error) {
 			readAllCalls++
 			return []byte("hello"), nil
@@ -1066,12 +1155,15 @@ func TestOpenReadOnlyDefersRemoteRead(t *testing.T) {
 			ObjectType: workspace.ObjectTypeFile,
 			Path:       "/test.txt",
 			Size:       5,
+			ModifiedAt: modTime.UnixMilli(),
 		}},
 		metadataCheckedAt: time.Now(),
 	}
 
-	if _, _, errno := n.Open(context.Background(), 0); errno != 0 {
+	if _, openFlags, errno := n.Open(context.Background(), 0); errno != 0 {
 		t.Fatalf("Open failed: %d", errno)
+	} else if openFlags&fuse.FOPEN_KEEP_CACHE == 0 {
+		t.Fatalf("expected KEEP_CACHE for unchanged read-only open, got flags=%d", openFlags)
 	}
 	if readAllCalls != 0 {
 		t.Fatalf("expected no eager reads on Open, got %d", readAllCalls)
@@ -1087,6 +1179,80 @@ func TestOpenReadOnlyDefersRemoteRead(t *testing.T) {
 	}
 	if readAllCalls != 1 {
 		t.Fatalf("expected one deferred read, got %d", readAllCalls)
+	}
+}
+
+func TestReadFallsBackToRemoteWhenCacheFileMissing(t *testing.T) {
+	api := &databricks.FakeWorkspaceAPI{
+		ReadAllFunc: func(ctx context.Context, filePath string) ([]byte, error) {
+			return []byte("fresh-data"), nil
+		},
+	}
+
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+			Size:       10,
+		}},
+		buf: fileBuffer{CachedPath: t.TempDir() + "/missing", FileSize: 10},
+	}
+
+	result, errno := n.Read(context.Background(), nil, make([]byte, 10), 0)
+	if errno != 0 {
+		t.Fatalf("Read failed: %d", errno)
+	}
+	data, _ := result.Bytes(nil)
+	if string(data) != "fresh-data" {
+		t.Fatalf("expected fallback data, got %q", string(data))
+	}
+	if n.buf.CachedPath != "" {
+		t.Fatalf("expected cache path cleared after fallback, got %q", n.buf.CachedPath)
+	}
+}
+
+func TestWriteFallsBackToRemoteWhenCacheChecksumMismatch(t *testing.T) {
+	cacheFile := t.TempDir() + "/cache"
+	if err := os.WriteFile(cacheFile, []byte("tampered"), 0600); err != nil {
+		t.Fatalf("write cache file: %v", err)
+	}
+
+	readAllCalls := 0
+	api := &databricks.FakeWorkspaceAPI{
+		ReadAllFunc: func(ctx context.Context, filePath string) ([]byte, error) {
+			readAllCalls++
+			return []byte("remote"), nil
+		},
+	}
+
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+			Size:       6,
+		}},
+		buf: fileBuffer{
+			CachedPath:     cacheFile,
+			CachedChecksum: filecache.CalculateChecksum([]byte("original")),
+			FileSize:       8,
+		},
+	}
+
+	if written, errno := n.Write(context.Background(), nil, []byte("X"), 0); errno != 0 {
+		t.Fatalf("Write failed: %d", errno)
+	} else if written != 1 {
+		t.Fatalf("expected 1 written byte, got %d", written)
+	}
+	if readAllCalls != 1 {
+		t.Fatalf("expected one remote reload after checksum mismatch, got %d", readAllCalls)
+	}
+	if got := string(n.buf.Data); got != "Xemote" {
+		t.Fatalf("unexpected buffer after write: %q", got)
+	}
+	if n.buf.CachedPath != "" || n.buf.CachedChecksum != "" {
+		t.Fatalf("expected cached file metadata cleared, got path=%q checksum=%q", n.buf.CachedPath, n.buf.CachedChecksum)
 	}
 }
 

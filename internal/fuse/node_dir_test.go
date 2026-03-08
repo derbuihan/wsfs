@@ -117,6 +117,7 @@ func TestWSNodeLookupSuccess(t *testing.T) {
 	}
 	root := newTestRootNode(t, api)
 	root.ownerUid = 11
+	root.ownerGid = 22
 	root.restrictAccess = true
 
 	out := &fuse.EntryOut{}
@@ -128,7 +129,7 @@ func TestWSNodeLookupSuccess(t *testing.T) {
 	if !ok {
 		t.Fatal("expected WSNode child")
 	}
-	if child.ownerUid != root.ownerUid || child.restrictAccess != root.restrictAccess {
+	if child.ownerUid != root.ownerUid || child.ownerGid != root.ownerGid || child.restrictAccess != root.restrictAccess {
 		t.Fatal("child did not inherit access config")
 	}
 }

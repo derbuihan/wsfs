@@ -55,10 +55,11 @@ const (
 // fileBuffer holds in-memory file data and dirty state.
 // For memory efficiency, CachedPath can be set instead of Data to read directly from cache.
 type fileBuffer struct {
-	Data       []byte
-	Dirty      bool
-	CachedPath string // Path to cached file for on-demand reading
-	FileSize   int64  // File size for cached file reads
+	Data           []byte
+	Dirty          bool
+	CachedPath     string // Path to cached file for on-demand reading
+	CachedChecksum string // SHA256 checksum for CachedPath contents
+	FileSize       int64  // File size for cached file reads
 	// ReplaceOnFirstWrite is used for notebook scaffolds created by Create().
 	// The first user write at offset 0 replaces the scaffold instead of overlaying it.
 	ReplaceOnFirstWrite bool
@@ -69,6 +70,7 @@ type wsFileHandle struct{}
 // NodeConfig holds configuration for access control.
 type NodeConfig struct {
 	OwnerUid       uint32 // UID of the user who mounted the filesystem
+	OwnerGid       uint32 // GID of the user who mounted the filesystem
 	RestrictAccess bool   // Whether to enforce UID-based access control
 }
 
@@ -88,6 +90,7 @@ type WSNode struct {
 	mu                sync.Mutex
 	registry          *DirtyNodeRegistry
 	ownerUid          uint32 // UID of the mount owner
+	ownerGid          uint32 // GID of the mount owner
 	restrictAccess    bool   // Enforce access control when true
 	openCount         int
 	dirtyFlags        dirtyFlag
@@ -192,10 +195,15 @@ func (n *WSNode) markModifiedLocked(t time.Time) {
 	n.fileInfo.ObjectInfo.ModifiedAt = t.UnixMilli()
 }
 
+func (n *WSNode) clearCachedFileLocked() {
+	n.buf.CachedPath = ""
+	n.buf.CachedChecksum = ""
+	n.buf.FileSize = 0
+}
+
 func (n *WSNode) resetBufferLocked() {
 	n.buf.Data = nil
-	n.buf.CachedPath = ""
-	n.buf.FileSize = 0
+	n.clearCachedFileLocked()
 	n.clearDirtyLocked()
 }
 
@@ -204,8 +212,27 @@ func (n *WSNode) clearCleanBufferLocked() {
 		return
 	}
 	n.buf.Data = nil
-	n.buf.CachedPath = ""
-	n.buf.FileSize = 0
+	n.clearCachedFileLocked()
+}
+
+func (n *WSNode) deleteDiskCacheEntries(paths ...string) {
+	if n.diskCache == nil || n.diskCache.IsDisabled() {
+		return
+	}
+
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		if err := n.diskCache.Delete(path); err != nil {
+			logging.Debugf("failed to delete cache entry for %s: %v", path, err)
+		}
+	}
 }
 
 func NewRootNode(wfClient databricks.WorkspaceFilesAPI, diskCache *filecache.DiskCache, rootPath string, registry *DirtyNodeRegistry, config *NodeConfig) (*WSNode, error) {
@@ -234,6 +261,7 @@ func NewRootNode(wfClient databricks.WorkspaceFilesAPI, diskCache *filecache.Dis
 	// Apply access control configuration
 	if config != nil {
 		node.ownerUid = config.OwnerUid
+		node.ownerGid = config.OwnerGid
 		node.restrictAccess = config.RestrictAccess
 	}
 

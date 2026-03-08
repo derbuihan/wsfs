@@ -148,8 +148,8 @@ func TestVersionString(t *testing.T) {
 }
 
 func TestBuildNodeConfig(t *testing.T) {
-	cfg := buildNodeConfig(42, true)
-	if cfg.OwnerUid != 42 || cfg.RestrictAccess {
+	cfg := buildNodeConfig(42, 24, true)
+	if cfg.OwnerUid != 42 || cfg.OwnerGid != 24 || cfg.RestrictAccess {
 		t.Fatalf("unexpected node config: %+v", cfg)
 	}
 }
@@ -203,7 +203,7 @@ func TestRunSuccess(t *testing.T) {
 		return "Tester", nil
 	}
 	deps.currentUser = func() (*user.User, error) {
-		return &user.User{Uid: "123"}, nil
+		return &user.User{Uid: "123", Gid: "456"}, nil
 	}
 	deps.newDiskCache = func() (*filecache.DiskCache, error) {
 		return filecache.NewDisabledCache(), nil
@@ -212,6 +212,12 @@ func TestRunSuccess(t *testing.T) {
 		return &fakeWorkspaceFilesClient{}, nil
 	}
 	deps.newRootNode = func(api databricks.WorkspaceFilesAPI, cache *filecache.DiskCache, rootPath string, registry *wsfsfuse.DirtyNodeRegistry, config *wsfsfuse.NodeConfig) (*wsfsfuse.WSNode, error) {
+		if config == nil {
+			t.Fatal("expected node config")
+		}
+		if config.OwnerUid != 123 || config.OwnerGid != 456 || !config.RestrictAccess {
+			t.Fatalf("unexpected node config: %+v", config)
+		}
 		return &wsfsfuse.WSNode{}, nil
 	}
 	server := &fakeServer{waitCh: make(chan struct{})}
@@ -253,7 +259,7 @@ func TestRunParseUIDError(t *testing.T) {
 		return "Tester", nil
 	}
 	deps.currentUser = func() (*user.User, error) {
-		return &user.User{Uid: "not-a-number"}, nil
+		return &user.User{Uid: "not-a-number", Gid: "456"}, nil
 	}
 	deps.newWorkspaceFilesClient = func(*databrickssdk.WorkspaceClient) (databricks.WorkspaceFilesAPI, error) {
 		return &fakeWorkspaceFilesClient{}, nil
@@ -261,6 +267,30 @@ func TestRunParseUIDError(t *testing.T) {
 
 	if err := run([]string{"wsfs", "/mnt/wsfs"}, deps); err == nil {
 		t.Fatal("expected error")
+	} else if !strings.Contains(err.Error(), "Failed to parse UID") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunParseGIDError(t *testing.T) {
+	deps := defaultDeps()
+	deps.initWorkspace = func() (*databrickssdk.WorkspaceClient, error) {
+		return &databrickssdk.WorkspaceClient{}, nil
+	}
+	deps.workspaceMe = func(ctx context.Context, w *databrickssdk.WorkspaceClient) (string, error) {
+		return "Tester", nil
+	}
+	deps.currentUser = func() (*user.User, error) {
+		return &user.User{Uid: "123", Gid: "not-a-number"}, nil
+	}
+	deps.newWorkspaceFilesClient = func(*databrickssdk.WorkspaceClient) (databricks.WorkspaceFilesAPI, error) {
+		return &fakeWorkspaceFilesClient{}, nil
+	}
+
+	if err := run([]string{"wsfs", "/mnt/wsfs"}, deps); err == nil {
+		t.Fatal("expected error")
+	} else if !strings.Contains(err.Error(), "Failed to parse GID") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -273,13 +303,22 @@ func TestRunMountOptionsUsesAllowOther(t *testing.T) {
 		return "Tester", nil
 	}
 	deps.currentUser = func() (*user.User, error) {
-		return &user.User{Uid: "123"}, nil
+		return &user.User{Uid: "123", Gid: "456"}, nil
 	}
 	deps.newWorkspaceFilesClient = func(*databrickssdk.WorkspaceClient) (databricks.WorkspaceFilesAPI, error) {
 		return &fakeWorkspaceFilesClient{}, nil
 	}
 
 	var gotAllowOther bool
+	deps.newRootNode = func(api databricks.WorkspaceFilesAPI, cache *filecache.DiskCache, rootPath string, registry *wsfsfuse.DirtyNodeRegistry, config *wsfsfuse.NodeConfig) (*wsfsfuse.WSNode, error) {
+		if config == nil {
+			t.Fatal("expected node config")
+		}
+		if config.OwnerUid != 123 || config.OwnerGid != 456 || config.RestrictAccess {
+			t.Fatalf("unexpected allow-other node config: %+v", config)
+		}
+		return &wsfsfuse.WSNode{}, nil
+	}
 	deps.mount = func(mountPoint string, root fs.InodeEmbedder, opts *fs.Options) (mountServer, error) {
 		gotAllowOther = opts.MountOptions.AllowOther
 		return &fakeServer{waitCh: make(chan struct{})}, nil
@@ -308,7 +347,7 @@ func TestRunUsesCacheEnabledError(t *testing.T) {
 		return "Tester", nil
 	}
 	deps.currentUser = func() (*user.User, error) {
-		return &user.User{Uid: "123"}, nil
+		return &user.User{Uid: "123", Gid: "456"}, nil
 	}
 	deps.newDiskCache = func() (*filecache.DiskCache, error) {
 		return nil, fmt.Errorf("cache error")
@@ -331,7 +370,7 @@ func TestRunNewRootNodeError(t *testing.T) {
 		return "Tester", nil
 	}
 	deps.currentUser = func() (*user.User, error) {
-		return &user.User{Uid: "123"}, nil
+		return &user.User{Uid: "123", Gid: "456"}, nil
 	}
 	deps.newWorkspaceFilesClient = func(*databrickssdk.WorkspaceClient) (databricks.WorkspaceFilesAPI, error) {
 		return &fakeWorkspaceFilesClient{}, nil
@@ -354,7 +393,7 @@ func TestRunMountError(t *testing.T) {
 		return "Tester", nil
 	}
 	deps.currentUser = func() (*user.User, error) {
-		return &user.User{Uid: "123"}, nil
+		return &user.User{Uid: "123", Gid: "456"}, nil
 	}
 	deps.newWorkspaceFilesClient = func(*databrickssdk.WorkspaceClient) (databricks.WorkspaceFilesAPI, error) {
 		return &fakeWorkspaceFilesClient{}, nil
@@ -432,7 +471,7 @@ func TestRunNewWorkspaceFilesClientError(t *testing.T) {
 		return "Tester", nil
 	}
 	deps.currentUser = func() (*user.User, error) {
-		return &user.User{Uid: "123"}, nil
+		return &user.User{Uid: "123", Gid: "456"}, nil
 	}
 	deps.newWorkspaceFilesClient = func(*databrickssdk.WorkspaceClient) (databricks.WorkspaceFilesAPI, error) {
 		return nil, errors.New("client error")
@@ -452,7 +491,7 @@ func TestRunSignalFlushErrors(t *testing.T) {
 		return "Tester", nil
 	}
 	deps.currentUser = func() (*user.User, error) {
-		return &user.User{Uid: "123"}, nil
+		return &user.User{Uid: "123", Gid: "456"}, nil
 	}
 	deps.newWorkspaceFilesClient = func(*databrickssdk.WorkspaceClient) (databricks.WorkspaceFilesAPI, error) {
 		return &fakeWorkspaceFilesClient{}, nil
@@ -518,7 +557,7 @@ func TestRunUsesDefaultDiskCacheFactory(t *testing.T) {
 		return "Tester", nil
 	}
 	deps.currentUser = func() (*user.User, error) {
-		return &user.User{Uid: "123"}, nil
+		return &user.User{Uid: "123", Gid: "456"}, nil
 	}
 	deps.newWorkspaceFilesClient = func(*databrickssdk.WorkspaceClient) (databricks.WorkspaceFilesAPI, error) {
 		return &fakeWorkspaceFilesClient{}, nil
@@ -584,7 +623,7 @@ func TestRunInvalidUIDType(t *testing.T) {
 		return "Tester", nil
 	}
 	deps.currentUser = func() (*user.User, error) {
-		return &user.User{Uid: strconv.FormatInt(int64(^uint64(0)>>1), 10)}, nil
+		return &user.User{Uid: strconv.FormatInt(int64(^uint64(0)>>1), 10), Gid: "456"}, nil
 	}
 	deps.newWorkspaceFilesClient = func(*databrickssdk.WorkspaceClient) (databricks.WorkspaceFilesAPI, error) {
 		return &fakeWorkspaceFilesClient{}, nil
@@ -665,7 +704,7 @@ func TestRunPassesRemotePathToRootNode(t *testing.T) {
 		return "Tester", nil
 	}
 	deps.currentUser = func() (*user.User, error) {
-		return &user.User{Uid: "123"}, nil
+		return &user.User{Uid: "123", Gid: "456"}, nil
 	}
 	deps.newDiskCache = func() (*filecache.DiskCache, error) {
 		return filecache.NewDisabledCache(), nil
@@ -705,7 +744,7 @@ func TestRunDefaultsRemotePathToSlash(t *testing.T) {
 		return "Tester", nil
 	}
 	deps.currentUser = func() (*user.User, error) {
-		return &user.User{Uid: "123"}, nil
+		return &user.User{Uid: "123", Gid: "456"}, nil
 	}
 	deps.newDiskCache = func() (*filecache.DiskCache, error) {
 		return filecache.NewDisabledCache(), nil
@@ -745,7 +784,7 @@ func TestRunSignalContextCancel(t *testing.T) {
 		return "Tester", nil
 	}
 	deps.currentUser = func() (*user.User, error) {
-		return &user.User{Uid: "123"}, nil
+		return &user.User{Uid: "123", Gid: "456"}, nil
 	}
 	deps.newWorkspaceFilesClient = func(*databrickssdk.WorkspaceClient) (databricks.WorkspaceFilesAPI, error) {
 		return &fakeWorkspaceFilesClient{}, nil

@@ -2,6 +2,7 @@ package fuse
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"syscall"
@@ -11,6 +12,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 
 	"wsfs/internal/databricks"
+	"wsfs/internal/filecache"
 	"wsfs/internal/logging"
 )
 
@@ -39,18 +41,19 @@ func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
 
 	// Try to get from cache first (only set CachedPath, don't load data)
 	if n.diskCache != nil && !n.diskCache.IsDisabled() {
-		cachedPath, _, found := n.diskCache.Get(remotePath, remoteModTime)
+		cachedPath, checksum, found := n.diskCache.Get(remotePath, remoteModTime)
 		if found {
 			// Verify cache file exists
 			if _, err := os.Stat(cachedPath); err == nil {
 				n.buf.CachedPath = cachedPath
+				n.buf.CachedChecksum = checksum
 				n.buf.FileSize = n.fileInfo.Size()
 				logging.Debugf("Cache path set for %s (on-demand read)", remotePath)
 				return 0
 			}
 			// Cache file missing, delete entry and fall through to remote read
 			logging.Debugf("Cache file missing for %s, fetching from remote", remotePath)
-			n.diskCache.Delete(remotePath)
+			n.deleteDiskCacheEntries(remotePath)
 		}
 	}
 
@@ -69,6 +72,7 @@ func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
 		localPath, err := n.diskCache.Set(remotePath, data, remoteModTime)
 		if err == nil {
 			n.buf.CachedPath = localPath
+			n.buf.CachedChecksum = filecache.CalculateChecksum(data)
 			n.buf.FileSize = int64(len(data))
 			logging.Debugf("Cached file %s (%d bytes), using on-demand read", remotePath, len(data))
 			return 0
@@ -83,22 +87,84 @@ func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
 	return 0
 }
 
+func (n *WSNode) invalidateCurrentCacheLocked() {
+	currentPath := n.Path()
+	n.clearCachedFileLocked()
+	n.deleteDiskCacheEntries(currentPath)
+}
+
+func (n *WSNode) loadDataFromCacheLocked(ctx context.Context) syscall.Errno {
+	readCache := func() ([]byte, error) {
+		data, err := os.ReadFile(n.buf.CachedPath)
+		if err != nil {
+			return nil, err
+		}
+		if n.buf.CachedChecksum != "" {
+			actualChecksum := filecache.CalculateChecksum(data)
+			if actualChecksum != n.buf.CachedChecksum {
+				return nil, fmt.Errorf("cache checksum mismatch for %s (expected %s, got %s)", n.Path(), truncateChecksum(n.buf.CachedChecksum), truncateChecksum(actualChecksum))
+			}
+		}
+		return data, nil
+	}
+
+	if n.buf.CachedPath == "" {
+		return 0
+	}
+
+	data, err := readCache()
+	if err == nil {
+		n.buf.Data = data
+		return 0
+	}
+
+	logging.Warnf("Failed to load cached data for mutation %s: %v", n.Path(), err)
+	n.invalidateCurrentCacheLocked()
+	if errno := n.ensureDataLocked(ctx); errno != 0 {
+		return errno
+	}
+	if n.buf.Data != nil {
+		return 0
+	}
+	if n.buf.CachedPath == "" {
+		return 0
+	}
+
+	data, err = readCache()
+	if err != nil {
+		logging.Warnf("Failed to reload cached data for mutation %s after remote fetch: %v", n.Path(), err)
+		n.invalidateCurrentCacheLocked()
+		return syscall.EIO
+	}
+	n.buf.Data = data
+	return 0
+}
+
+func (n *WSNode) ensureDataForMutationLocked(ctx context.Context) syscall.Errno {
+	if n.buf.Data != nil {
+		return 0
+	}
+	if n.buf.CachedPath != "" {
+		if errno := n.loadDataFromCacheLocked(ctx); errno != 0 {
+			return errno
+		}
+		return 0
+	}
+	if errno := n.ensureDataLocked(ctx); errno != 0 {
+		return errno
+	}
+	if n.buf.Data == nil && n.buf.CachedPath != "" {
+		if errno := n.loadDataFromCacheLocked(ctx); errno != 0 {
+			return errno
+		}
+	}
+	return 0
+}
+
 func (n *WSNode) truncateLocked(size uint64) {
 	if size == 0 {
 		n.buf.Data = []byte{}
 	} else {
-		// If data is in cache but not memory, load it first
-		if n.buf.Data == nil && n.buf.CachedPath != "" {
-			cacheData, err := os.ReadFile(n.buf.CachedPath)
-			if err != nil {
-				logging.Warnf("Failed to load cache file for truncate %s: %v", n.buf.CachedPath, err)
-				// Fall through with empty data
-				n.buf.Data = []byte{}
-			} else {
-				n.buf.Data = cacheData
-			}
-		}
-
 		if n.buf.Data == nil {
 			n.buf.Data = []byte{}
 		}
@@ -170,21 +236,20 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 		return nil, 0, syscall.EISDIR
 	}
 
-	if errno := n.refreshMetadataIfNeededLocked(ctx); errno != 0 {
+	metadataChanged := false
+	forceFreshnessCheck := !n.isDirtyLocked() && flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_TRUNC) == 0
+	if changed, errno := n.refreshMetadataLocked(ctx, forceFreshnessCheck); errno != 0 {
 		return nil, 0, errno
+	} else {
+		metadataChanged = changed
 	}
 
 	if flags&syscall.O_TRUNC != 0 {
 		// Invalidate caches immediately for truncation
 		n.wfClient.CacheInvalidate(n.Path())
-		if n.diskCache != nil && !n.diskCache.IsDisabled() {
-			if err := n.diskCache.Delete(n.fileInfo.Path); err != nil {
-				logging.Debugf("Failed to delete cache for %s: %v", n.fileInfo.Path, err)
-			}
-		}
+		n.deleteDiskCacheEntries(n.fileInfo.Path)
 
-		n.buf.CachedPath = ""
-		n.buf.FileSize = 0
+		n.clearCachedFileLocked()
 		n.truncateLocked(0)
 		n.markModifiedLocked(time.Now())
 		n.metadataCheckedAt = time.Now()
@@ -192,6 +257,8 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 
 	openFlags := uint32(0)
 	if flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_TRUNC) != 0 {
+		openFlags |= fuse.FOPEN_DIRECT_IO
+	} else if metadataChanged {
 		openFlags |= fuse.FOPEN_DIRECT_IO
 	} else {
 		openFlags |= fuse.FOPEN_KEEP_CACHE
@@ -215,7 +282,20 @@ func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off in
 
 	// 2. If cache path is set, read directly from cache file (on-demand)
 	if n.buf.CachedPath != "" {
-		return n.readFromCacheFile(dest, off)
+		result, errno := n.readFromCacheFile(dest, off)
+		if errno == 0 {
+			return result, 0
+		}
+		if n.buf.CachedPath == "" && n.buf.Data == nil {
+			if errno := n.ensureDataLocked(ctx); errno != 0 {
+				return nil, errno
+			}
+			if n.buf.CachedPath != "" {
+				return n.readFromCacheFile(dest, off)
+			}
+			return n.readFromMemory(dest, off)
+		}
+		return nil, errno
 	}
 
 	// 3. If data is in memory, read from memory
@@ -230,7 +310,20 @@ func (n *WSNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off in
 
 	// After ensureDataLocked, check again
 	if n.buf.CachedPath != "" {
-		return n.readFromCacheFile(dest, off)
+		result, errno := n.readFromCacheFile(dest, off)
+		if errno == 0 {
+			return result, 0
+		}
+		if n.buf.CachedPath == "" && n.buf.Data == nil {
+			if errno := n.ensureDataLocked(ctx); errno != 0 {
+				return nil, errno
+			}
+			if n.buf.CachedPath != "" {
+				return n.readFromCacheFile(dest, off)
+			}
+			return n.readFromMemory(dest, off)
+		}
+		return nil, errno
 	}
 
 	// Fallback to memory read
@@ -262,9 +355,7 @@ func (n *WSNode) readFromCacheFile(dest []byte, off int64) (fuse.ReadResult, sys
 	f, err := os.Open(n.buf.CachedPath)
 	if err != nil {
 		logging.Warnf("Failed to open cache file %s: %v", n.buf.CachedPath, err)
-		// Cache file missing, clear and return error
-		n.buf.CachedPath = ""
-		n.buf.FileSize = 0
+		n.invalidateCurrentCacheLocked()
 		return nil, syscall.EIO
 	}
 	defer f.Close()
@@ -284,6 +375,7 @@ func (n *WSNode) readFromCacheFile(dest []byte, off int64) (fuse.ReadResult, sys
 	bytesRead, err := f.ReadAt(buf, off)
 	if err != nil && err != io.EOF {
 		logging.Warnf("Failed to read from cache file %s: %v", n.buf.CachedPath, err)
+		n.invalidateCurrentCacheLocked()
 		return nil, syscall.EIO
 	}
 
@@ -301,30 +393,8 @@ func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off i
 
 	// For writes, we need the data in memory
 	if n.buf.Data == nil {
-		// If cache path is set, load from cache file
-		if n.buf.CachedPath != "" {
-			cacheData, err := os.ReadFile(n.buf.CachedPath)
-			if err != nil {
-				logging.Warnf("Failed to load cache file for write %s: %v", n.buf.CachedPath, err)
-				return 0, syscall.EIO
-			}
-			n.buf.Data = cacheData
-			logging.Debugf("Loaded %d bytes from cache for write on %s", len(cacheData), n.fileInfo.Path)
-		} else {
-			// No cache path, call ensureDataLocked
-			if errno := n.ensureDataLocked(ctx); errno != 0 {
-				return 0, errno
-			}
-			// After ensureDataLocked, if CachedPath is set but Data is nil, load from cache
-			if n.buf.Data == nil && n.buf.CachedPath != "" {
-				cacheData, err := os.ReadFile(n.buf.CachedPath)
-				if err != nil {
-					logging.Warnf("Failed to load cache file for write %s: %v", n.buf.CachedPath, err)
-					return 0, syscall.EIO
-				}
-				n.buf.Data = cacheData
-				logging.Debugf("Loaded %d bytes from cache for write on %s", len(cacheData), n.fileInfo.Path)
-			}
+		if errno := n.ensureDataForMutationLocked(ctx); errno != 0 {
+			return 0, errno
 		}
 	}
 
@@ -334,8 +404,7 @@ func (n *WSNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off i
 	}
 	if n.buf.ReplaceOnFirstWrite && off == 0 {
 		n.buf.Data = []byte{}
-		n.buf.CachedPath = ""
-		n.buf.FileSize = 0
+		n.clearCachedFileLocked()
 	}
 
 	end := off + int64(len(data))
