@@ -26,11 +26,13 @@ POSIX expectations, and operational safety.
 
 - Supported:
   - size changes / truncate
+  - chmod-style mode updates as compatibility no-ops
 - Unsupported (`ENOTSUP`):
   - atime-only updates
   - mtime-only updates
   - combined atime+mtime updates such as `touch existing-file`
-  - chmod / chown / chgrp
+  - chown / chgrp
+- `chmod` requests succeed but do not change reported mode bits or backend permissions.
 - When truncate and timestamps are requested together, wsfs performs the size change and ignores the requested timestamps. The backend write time becomes the effective `mtime`.
 
 ## Cache semantics

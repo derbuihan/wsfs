@@ -15,7 +15,7 @@ A FUSE-based file system to interact with Databricks workspace files and directo
 - [x] Expose Databricks notebooks as source files (`.py`, `.sql`, `.scala`, `.R`) based on notebook language.
 
 Notes:
-- `Setattr` supports size changes. Timestamp-only updates on existing files (`atime`, `mtime`, or both) return `ENOTSUP`. `chmod`/`chown` also return `ENOTSUP`.
+- `Setattr` supports size changes. Timestamp-only updates on existing files (`atime`, `mtime`, or both) return `ENOTSUP`. `chmod` succeeds as a compatibility no-op, while `chown` still returns `ENOTSUP`.
 - Vim saves are verified in the test suite.
 - Notebooks are shown as source files by default. `.ipynb` appears only as a fallback when the preferred source name collides with an exact workspace entry or when notebook language is unknown.
 

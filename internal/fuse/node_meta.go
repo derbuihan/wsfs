@@ -178,7 +178,8 @@ func (n *WSNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttr
 	logging.Debugf("Setattr called on path: %s", n.fileInfo.Path)
 
 	if _, ok := in.GetMode(); ok {
-		return syscall.ENOTSUP
+		// chmod-style requests are accepted as a compatibility no-op.
+		// Reported mode bits remain synthetic and stable.
 	}
 	if _, ok := in.GetUID(); ok {
 		return syscall.ENOTSUP

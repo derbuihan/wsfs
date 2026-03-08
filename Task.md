@@ -44,6 +44,7 @@
 - [x] stat の owner 表示を mount owner UID/GID に固定（`NodeConfig.OwnerGid` 追加、caller 依存の `stat` を廃止）
 - [x] timestamp-only `Setattr` を `ENOTSUP` に統一（`touch existing-file` / `os.utime` 系、size change 併用時は timestamp 指定を無視）
 - [x] docs/tests 整合（`docs/behavior.md` 新設、README 更新、security/cache/fuse shell test の期待値修正）
+- [x] `chmod` を互換 no-op success に変更して Git 互換改善（`git init` の lockfile 権限調整を許容、Setattr/FUSE テスト更新）
 
 ---
 
@@ -82,7 +83,7 @@
 ## 既知の制限事項
 
 - Statfs は固定値
-- atime-only 更新は ENOTSUP、chmod/chown も ENOTSUP
+- atime-only 更新は ENOTSUP、`chmod` は互換 no-op success、`chown` は ENOTSUP
 - `new-files` signed URL upload は 403 の場合あり（フォールバックで対応）
 - 推奨: 単一ユーザー開発用途 / CI / ローカル編集
 - 非推奨: チーム共有サーバー / 本番運用 / 機密データ環境

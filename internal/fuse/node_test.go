@@ -528,8 +528,9 @@ func TestWSNodeSetattr(t *testing.T) {
 
 	// Test size change (truncate)
 	in := &fuse.SetAttrIn{}
-	in.Valid = fuse.FATTR_SIZE
+	in.Valid = fuse.FATTR_SIZE | fuse.FATTR_MODE
 	in.Size = 5
+	in.Mode = 0600
 	out := &fuse.AttrOut{}
 
 	errno := n.Setattr(context.Background(), nil, in, out)
@@ -538,6 +539,34 @@ func TestWSNodeSetattr(t *testing.T) {
 	}
 	if out.Size != 5 {
 		t.Errorf("Expected size 5, got %d", out.Size)
+	}
+	if got := out.Mode & 0777; got != fileMode {
+		t.Errorf("expected synthetic mode %o, got %o", fileMode, got)
+	}
+}
+
+func TestWSNodeSetattrAcceptsModeOnlyAsNoOp(t *testing.T) {
+	n := &WSNode{
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+			Size:       12,
+		}},
+	}
+
+	in := &fuse.SetAttrIn{}
+	in.Valid = fuse.FATTR_MODE
+	in.Mode = 0600
+	out := &fuse.AttrOut{}
+
+	if errno := n.Setattr(context.Background(), nil, in, out); errno != 0 {
+		t.Fatalf("expected success, got errno %d", errno)
+	}
+	if out.Size != 12 {
+		t.Fatalf("expected size 12, got %d", out.Size)
+	}
+	if got := out.Mode & 0777; got != fileMode {
+		t.Fatalf("expected synthetic mode %o, got %o", fileMode, got)
 	}
 }
 
@@ -574,6 +603,55 @@ func TestWSNodeSetattrRejectsTimestampOnly(t *testing.T) {
 				Valid: fuse.FATTR_ATIME | fuse.FATTR_MTIME,
 				Atime: uint64(time.Now().Unix()),
 				Mtime: uint64(time.Now().Unix()),
+			}},
+		},
+		{
+			name: "mode and mtime",
+			in: func() *fuse.SetAttrIn {
+				in := &fuse.SetAttrIn{}
+				in.Valid = fuse.FATTR_MODE | fuse.FATTR_MTIME
+				in.Mode = 0600
+				in.Mtime = uint64(time.Now().Unix())
+				return in
+			}(),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := &fuse.AttrOut{}
+			if errno := n.Setattr(context.Background(), nil, tc.in, out); errno != syscall.ENOTSUP {
+				t.Fatalf("expected ENOTSUP, got %d", errno)
+			}
+		})
+	}
+}
+
+func TestWSNodeSetattrRejectsUIDAndGID(t *testing.T) {
+	n := &WSNode{
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+			Size:       12,
+		}},
+	}
+
+	testCases := []struct {
+		name string
+		in   *fuse.SetAttrIn
+	}{
+		{
+			name: "uid only",
+			in: &fuse.SetAttrIn{SetAttrInCommon: fuse.SetAttrInCommon{
+				Valid: fuse.FATTR_UID,
+				Owner: fuse.Owner{Uid: 1234},
+			}},
+		},
+		{
+			name: "gid only",
+			in: &fuse.SetAttrIn{SetAttrInCommon: fuse.SetAttrInCommon{
+				Valid: fuse.FATTR_GID,
+				Owner: fuse.Owner{Gid: 5678},
 			}},
 		},
 	}

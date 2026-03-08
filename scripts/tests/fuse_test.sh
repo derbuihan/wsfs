@@ -207,29 +207,27 @@ assert_eq "$BEFORE" "$AFTER" "touch on existing file does not change mtime"
 CONTENT=$(cat touch_test.txt)
 assert_eq "touch" "$CONTENT" "timestamp-only update does not modify file content"
 
-# chmod (expected to fail - not supported)
+# chmod (expected to succeed as a no-op for compatibility)
 run_cmd 'printf "perm" > perm.txt'
-set +e
-chmod 600 perm.txt 2>/dev/null
-CHMOD_RC=$?
-set -e
-if [ $CHMOD_RC -ne 0 ]; then
-  echo -e "${GREEN}✓ PASS:${NC} chmod returns error (not supported)"
-  ((TEST_PASSED++)) || true
-else
-  echo -e "${YELLOW}⊘ INFO:${NC} chmod succeeded (may be no-op)"
-fi
+assert_exit_code 0 'chmod 600 perm.txt' "chmod succeeds as no-op"
+CONTENT=$(cat perm.txt)
+assert_eq "perm" "$CONTENT" "chmod no-op does not modify content"
 
 # chown (expected to fail - not supported)
 set +e
 chown 9999:9999 perm.txt 2>/dev/null
 CHOWN_RC=$?
 set -e
-if [ $CHOWN_RC -ne 0 ]; then
-  echo -e "${GREEN}✓ PASS:${NC} chown returns error (not supported)"
-  ((TEST_PASSED++)) || true
+assert "[ $CHOWN_RC -ne 0 ]" "chown returns error (not supported)"
+
+# git init compatibility (requires chmod no-op support)
+if command -v git >/dev/null 2>&1; then
+  run_cmd 'mkdir gitrepo'
+  assert_exit_code 0 '(cd gitrepo && git init)' "git init succeeds on wsfs"
+  assert_file_exists "gitrepo/.git/config" "git init creates .git/config"
+  assert_exit_code 0 '(cd gitrepo && git rev-parse --is-inside-work-tree)' "git repo is usable after init"
 else
-  echo -e "${YELLOW}⊘ INFO:${NC} chown succeeded (may be no-op)"
+  skip_test "git not installed; skipping git init compatibility check"
 fi
 
 # ============================================
