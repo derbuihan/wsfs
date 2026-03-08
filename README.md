@@ -76,14 +76,15 @@ Useful variants:
 Notes:
 - The FUSE mount is inside the container, not directly on the host filesystem.
 - This works consistently for macOS and Linux development machines.
-- For host-integrated installs, prefer the packaged `.deb` + systemd flow below.
+- Packaged host-integrated installs are Linux-only; on macOS, use the Docker workflow above.
+- For Linux host-integrated installs, prefer the packaged `.deb` + systemd flow below.
 
 ## Debian/Ubuntu (.deb)
 
-1. Download the latest `.deb` from GitHub Releases and install it.
+1. Download the latest Linux `.deb` from GitHub Releases and install it.
 
 ```bash
-$ sudo dpkg -i wsfs_*.deb
+$ sudo apt install ./wsfs_*.deb
 ```
 
 2. Create a systemd user env file (no `export` lines) and enable the service.
@@ -96,7 +97,7 @@ $ systemctl --user daemon-reload
 $ systemctl --user enable --now wsfs@dev
 ```
 
-**Update:** download a newer `.deb` and run `dpkg -i` again (manual updates).
+**Update:** download a newer Linux `.deb` and run `apt install ./wsfs_*.deb` again.
 
 ## Security Considerations
 

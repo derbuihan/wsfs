@@ -1,90 +1,25 @@
-# AGENTS.md
+# Workflow
+1. Check `Task.md` before changing anything.
+2. Keep changes small and focused.
+3. Format and test when the change can affect behavior.
+   - If you change Go files, run `gofmt -w` on the touched files first.
+   - Start with the smallest relevant Go tests.
+   - Prefer `go test ./...` before Docker/FUSE runs.
+   - Run `./scripts/test_docker.sh --fuse-only` for FUSE, mount, or integration-facing changes.
+   - Run `./scripts/test_vscode_docker.sh` when VSCode integration behavior or `scripts/tests/vscode/` changes.
+   - If you change `scripts/tests/vscode/`, also run `cd scripts/tests/vscode && npm run build` for TypeScript checking.
+4. Update `Task.md` for substantive progress.
 
-AI coding agent guidance for this repo.
+# Common commands
+- `./scripts/run_wsfs_docker.sh` — open a Docker shell with wsfs mounted at `/mnt/wsfs`
+- `./scripts/run_wsfs_docker.sh --debug` — same shell with debug logging
+- `./scripts/run_wsfs_docker.sh -- 'ls /mnt/wsfs'` — run one command inside the mounted container
+- `./scripts/test_docker.sh` — run the standard Docker integration suites
+- `./scripts/test_vscode_docker.sh` — run the VSCode Docker integration tests
 
-## Workflow (must follow)
-1. Confirm `Task.md` and select the task to work on.
-2. Implement the task.
-3. Run tests to confirm no regression.
-   - Always run the FUSE test suite after implementation (normally `./scripts/test_docker.sh --fuse-only`). If it fails, fix the failing part.
-4. Update `Task.md` when progress changes.
+# Notes
+- Preserve established filesystem semantics; see `docs/behavior.md` when touching FUSE behavior.
+- Required env vars: `DATABRICKS_HOST`, `DATABRICKS_TOKEN`
+- Never commit `.env`.
 
-## Project overview
-`wsfs` is a FUSE-based filesystem that mounts Databricks Workspace Files locally.
-
-Key entry points:
-- `main.go`: CLI entry point and mount setup.
-- `client.go`: Databricks Workspace Files client.
-- `node.go`: FUSE node implementation.
-- `scripts/tests/fuse_test.sh`: Filesystem integration tests.
-
-## Current behavior notes
-- `Setattr` supports size changes (truncate); timestamp-only updates on existing files return `ENOTSUP`, but the initial post-create timestamp sync for a brand-new empty file succeeds as a compatibility no-op.
-- `chmod` succeeds as a compatibility no-op; `chown`/`chgrp`/uid/gid changes are `ENOTSUP`.
-- Stable inode IDs are derived from Databricks `ObjectId`/`ResourceId`/`Path` to avoid editor save errors.
-- Vim save paths (default/backup/swap) are validated in `scripts/tests/fuse_test.sh`.
-
-## Environment
-Required env vars (do not commit secrets):
-- `DATABRICKS_HOST`
-- `DATABRICKS_TOKEN`
-
-Local `.env` is expected for development, but must never be committed.
-
-## Build & run
-Use the Docker shell wrapper for source-checkout development on both macOS and Linux.
-The wsfs mount lives inside the container shell, not on the host filesystem.
-
-Open an interactive shell with wsfs mounted at `/mnt/wsfs`:
-```bash
-./scripts/run_wsfs_docker.sh
-```
-
-Open the same shell with debug logging enabled:
-```bash
-./scripts/run_wsfs_docker.sh --debug
-```
-
-Run one command inside the mounted container instead of an interactive shell:
-```bash
-./scripts/run_wsfs_docker.sh -- 'ls -la /mnt/wsfs'
-```
-
-## Tests
-Docker (recommended on macOS and Linux):
-```bash
-./scripts/test_docker.sh
-```
-
-Debugging failing shell tests (Docker):
-- If a shell test fails, re-run that script directly in a Docker container to isolate the failure.
-```bash
-docker compose run --rm wsfs-test bash -c '
-  set -e
-  go build -o /tmp/wsfs ./cmd/wsfs
-  export XDG_CACHE_HOME=/tmp/xdg-cache
-  mkdir -p /mnt/wsfs "$XDG_CACHE_HOME/wsfs"
-  /tmp/wsfs --debug /mnt/wsfs > /tmp/wsfs.log 2>&1 &
-  WSFS_PID=$!
-  for i in $(seq 1 30); do
-    if grep -q " /mnt/wsfs " /proc/mounts 2>/dev/null; then break; fi
-    sleep 1
-  done
-  ./scripts/tests/fuse_test.sh /mnt/wsfs
-  TEST_RESULT=$?
-  fusermount3 -u /mnt/wsfs || fusermount -u /mnt/wsfs || umount /mnt/wsfs || true
-  kill $WSFS_PID 2>/dev/null || true
-  exit $TEST_RESULT
-'
-```
-- When needed, replace `./scripts/tests/fuse_test.sh /mnt/wsfs` with a smaller failing script or a minimal inline repro to narrow down the root cause.
-
-
-## Coding conventions
-- Keep changes small and focused.
-- Avoid logging noise; gate diagnostics behind `-debug`.
-- Prefer clear, maintainable Go code over cleverness.
-
-## Repository hygiene
-- Do not commit secrets (e.g., `.env`).
-- Update README when adding new workflows or commands.
+See `README.md` for detailed workflow and troubleshooting.

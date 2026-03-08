@@ -47,6 +47,11 @@
 - [x] `chmod` を互換 no-op success に変更して Git 互換改善（`git init` の lockfile 権限調整を許容、Setattr/FUSE テスト更新）
 - [x] Docker テスト導線と VSCode テスト配置を整理（`scripts/test_docker.sh` / `scripts/test_vscode_docker.sh` / `scripts/tests/run.sh` / `scripts/tests/vscode/` へ統一、README/AGENTS/CLAUDE 更新）
 - [x] `touch new-file` 互換を回復（新規空ファイルの post-create timestamp sync を no-op success に限定、FUSE `os.utime` テストの quoting も修正）
+- [x] `AGENTS.md` を簡潔化（`CLAUDE.md` から参照する前提で必須ワークフローと主要コマンドに整理）
+- [x] `AGENTS.md` をさらに簡潔化（試験は必要時のみ、まず Go unit test を優先する方針に更新）
+- [x] `AGENTS.md` をさらに整理（コマンド説明追加、VSCode test/TS 型チェック方針を明記、`Preserve` を短い Notes に集約）
+- [x] `AGENTS.md` に `gofmt` 方針を追加（Go 変更時は touched files を先に整形する運用を明記）
+- [x] リリース成果物を Linux-only に整理（unsupported な `darwin` archive を削除、README の `.deb` install/update を `apt install ./...` に更新）
 
 ---
 
