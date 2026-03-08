@@ -3,8 +3,8 @@ module wsfs
 go 1.22.2
 
 require (
-	github.com/databricks/databricks-sdk-go v0.84.0
-	github.com/hanwen/go-fuse/v2 v2.8.0
+	github.com/databricks/databricks-sdk-go v0.118.0
+	github.com/hanwen/go-fuse/v2 v2.9.0
 )
 
 require (
@@ -18,6 +18,7 @@ require (
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/go-querystring v1.1.0 // indirect
 	github.com/google/s2a-go v0.1.7 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.2 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	go.opencensus.io v0.24.0 // indirect

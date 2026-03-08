@@ -37,6 +37,7 @@
 
 ## 完了（2026-03-08）
 
+- [x] 依存更新（`github.com/databricks/databricks-sdk-go` v0.118.0 / `github.com/hanwen/go-fuse/v2` v2.9.0、Go test と Docker FUSE test を確認）
 - [x] ソース checkout の実行導線を Docker shell に統一（`scripts/run_wsfs_docker.sh` 追加、AGENTS/README から direct-run 導線を削除、macOS/Linux の案内を統一）
 - [x] Open 時の freshness 強化（clean な通常ファイルを read-only open でリモート再検証、変更検知時は clean buffer / metadata cache / disk cache を無効化し `DIRECT_IO` を返す）
 - [x] ディスクキャッシュ hardening（checksum 追跡、missing/corrupt cache の invalidate + remote retry、mutation 前の整合チェック）
@@ -52,6 +53,7 @@
 - [x] `AGENTS.md` をさらに整理（コマンド説明追加、VSCode test/TS 型チェック方針を明記、`Preserve` を短い Notes に集約）
 - [x] `AGENTS.md` に `gofmt` 方針を追加（Go 変更時は touched files を先に整形する運用を明記）
 - [x] リリース成果物を Linux-only に整理（unsupported な `darwin` archive を削除、README の `.deb` install/update を `apt install ./...` に更新）
+- [x] release artifact に third-party licenses を同梱（`go-licenses save` を release 前 hook に追加し、`tar.gz` / `.deb` に同梱）
 
 ---
 

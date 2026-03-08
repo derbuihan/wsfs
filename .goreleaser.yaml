@@ -3,6 +3,7 @@ version: 2
 before:
   hooks:
     - go mod download
+    - /bin/bash -c "rm -rf third_party && GOWORK=off go run github.com/google/go-licenses/v2@v2.0.1 save --force --ignore wsfs ./cmd/wsfs --save_path third_party"
 
 builds:
   - env:
@@ -26,6 +27,9 @@ builds:
 archives:
   - formats: ["tar.gz"]
     name_template: 'wsfs_{{ .Os }}_{{ .Arch }}'
+    files:
+      - src: third_party
+        dst: third_party
 
 nfpms:
   - package_name: wsfs
@@ -39,6 +43,8 @@ nfpms:
         dst: /usr/lib/systemd/user/wsfs@.service
       - src: packaging/systemd/wsfs.env.example
         dst: /usr/share/doc/wsfs/wsfs.env.example
+      - src: third_party
+        dst: /usr/share/doc/wsfs/third_party
 
 checksum:
   name_template: 'wsfs_SHA256SUMS'
