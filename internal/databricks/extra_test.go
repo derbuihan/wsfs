@@ -76,6 +76,9 @@ func TestFakeWorkspaceAPIDefaults(t *testing.T) {
 	if _, err := api.Stat(ctx, "/missing"); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("expected ErrNotExist, got %v", err)
 	}
+	if _, err := api.StatFresh(ctx, "/missing"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("expected ErrNotExist, got %v", err)
+	}
 	if _, err := api.ReadDir(ctx, "/missing"); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("expected ErrNotExist, got %v", err)
 	}

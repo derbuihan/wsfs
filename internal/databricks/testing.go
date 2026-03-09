@@ -15,6 +15,7 @@ import (
 // FakeWorkspaceAPI is a test double for WorkspaceFilesAPI
 type FakeWorkspaceAPI struct {
 	StatFunc            func(ctx context.Context, filePath string) (fs.FileInfo, error)
+	StatFreshFunc       func(ctx context.Context, filePath string) (fs.FileInfo, error)
 	ReadDirFunc         func(ctx context.Context, dirPath string) ([]fs.DirEntry, error)
 	ReadAllFunc         func(ctx context.Context, filePath string) ([]byte, error)
 	WriteFunc           func(ctx context.Context, filepath string, data []byte) error
@@ -26,6 +27,16 @@ type FakeWorkspaceAPI struct {
 }
 
 func (f *FakeWorkspaceAPI) Stat(ctx context.Context, filePath string) (fs.FileInfo, error) {
+	if f.StatFunc != nil {
+		return f.StatFunc(ctx, filePath)
+	}
+	return nil, fs.ErrNotExist
+}
+
+func (f *FakeWorkspaceAPI) StatFresh(ctx context.Context, filePath string) (fs.FileInfo, error) {
+	if f.StatFreshFunc != nil {
+		return f.StatFreshFunc(ctx, filePath)
+	}
 	if f.StatFunc != nil {
 		return f.StatFunc(ctx, filePath)
 	}

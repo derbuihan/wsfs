@@ -4,8 +4,8 @@
   "version": "0.0.1",
   "description": "VSCode integration tests for wsfs",
   "scripts": {
-    "build": "tsc -p .",
-    "test": "node dist/scripts/runTest.js"
+    "build": "rm -rf dist-generated && tsc -p .",
+    "test": "node dist-generated/scripts/runTest.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.6",

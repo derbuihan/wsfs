@@ -851,6 +851,114 @@ func TestCacheInvalidation(t *testing.T) {
 	}
 }
 
+func TestStatFreshBypassesStaleDirectAndDirCaches(t *testing.T) {
+	freshSize := int64(14)
+	freshModTime := time.Now().UnixMilli()
+	objectInfoCalls := 0
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if !strings.Contains(path, "object-info") {
+				return fmt.Errorf("unexpected path: %s", path)
+			}
+			objectInfoCalls++
+			resp := response.(*objectInfoResponse)
+			resp.WsfsObjectInfo = wsfsObjectInfo{
+				ObjectInfo: workspace.ObjectInfo{
+					Path:       "/test.txt",
+					ObjectType: workspace.ObjectTypeFile,
+					Size:       freshSize,
+					ModifiedAt: freshModTime,
+				},
+			}
+			return nil
+		},
+	}
+
+	cache := metacache.NewCacheWithTTLs(10*time.Second, 3*time.Second)
+	staleInfo := WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+		Path:       "/test.txt",
+		ObjectType: workspace.ObjectTypeFile,
+		Size:       0,
+		ModifiedAt: freshModTime - 1000,
+	}}
+	cache.Set("/test.txt", staleInfo)
+	cache.SetDirEntries("/", []fs.DirEntry{WSDirEntry{staleInfo}}, []metacache.DirLookupEntry{{Name: "test.txt", Info: staleInfo}})
+
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, cache)
+
+	info, err := client.StatFresh(context.Background(), "/test.txt")
+	if err != nil {
+		t.Fatalf("StatFresh failed: %v", err)
+	}
+	if objectInfoCalls != 1 {
+		t.Fatalf("expected 1 object-info call, got %d", objectInfoCalls)
+	}
+
+	wsInfo, ok := info.(WSFileInfo)
+	if !ok {
+		t.Fatalf("expected WSFileInfo, got %T", info)
+	}
+	if wsInfo.Size() != freshSize {
+		t.Fatalf("expected fresh size %d, got %d", freshSize, wsInfo.Size())
+	}
+
+	cached, found := client.cache.Get("/test.txt")
+	if !found {
+		t.Fatal("expected fresh cache entry after StatFresh")
+	}
+	cachedInfo, ok := cached.(WSFileInfo)
+	if !ok {
+		t.Fatalf("expected cached WSFileInfo, got %T", cached)
+	}
+	if cachedInfo.Size() != freshSize {
+		t.Fatalf("expected cached size %d, got %d", freshSize, cachedInfo.Size())
+	}
+}
+
+func TestWriteInvalidatesStaleDirectAndDirCachesAfterSuccess(t *testing.T) {
+	testContent := []byte("new content")
+	staleInfo := WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+		Path:       "/test.txt",
+		ObjectType: workspace.ObjectTypeFile,
+		Size:       0,
+		ModifiedAt: time.Now().Add(-time.Second).UnixMilli(),
+	}}
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "import-file") {
+				return nil
+			}
+			if strings.Contains(path, "new-files") {
+				return fmt.Errorf("skip to fallback")
+			}
+			return fmt.Errorf("unexpected path: %s", path)
+		},
+	}
+
+	cache := metacache.NewCacheWithTTLs(10*time.Second, 3*time.Second)
+	cache.Set("/test.txt", staleInfo)
+	cache.SetDirEntries("/", []fs.DirEntry{WSDirEntry{staleInfo}}, []metacache.DirLookupEntry{{Name: "test.txt", Info: staleInfo}})
+
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, cache)
+
+	if err := client.Write(context.Background(), "/test.txt", testContent); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	if _, found := client.cache.Get("/test.txt"); found {
+		t.Fatal("expected direct cache entry to be invalidated after successful write")
+	}
+	if _, found := client.cache.LookupDirEntry("/test.txt"); found {
+		t.Fatal("expected directory lookup cache to be invalidated after successful write")
+	}
+}
+
 // TestWSFileInfoImplementsFileInfo verifies that WSFileInfo correctly implements fs.FileInfo
 func TestWSFileInfoImplementsFileInfo(t *testing.T) {
 	now := time.Now()

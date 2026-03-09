@@ -84,12 +84,16 @@ if [ "$can_run_as_other" != true ]; then
   skip_test "Cannot switch to user nobody in this environment"
 else
   SHARED_FILE="${TEST_BASE_DIR}/shared.txt"
-  printf 'shared content' > "${SHARED_FILE}"
+  SHARED_CONTENT='shared content'
+  printf '%s' "$SHARED_CONTENT" > "${SHARED_FILE}"
 
   assert 'run_as_other ls "${TEST_BASE_DIR}" >/dev/null 2>&1' "Non-owner can list directory"
 
+  OTHER_SIZE=$(run_as_other stat -c %s "${SHARED_FILE}")
+  assert_eq "${#SHARED_CONTENT}" "$OTHER_SIZE" "Non-owner sees current file size after directory listing"
+
   OTHER_CONTENT=$(run_as_other cat "${SHARED_FILE}")
-  assert_eq "shared content" "$OTHER_CONTENT" "Non-owner can read file"
+  assert_eq "$SHARED_CONTENT" "$OTHER_CONTENT" "Non-owner can read file"
 
   run_as_other sh -c "printf 'modified by nobody' > '${SHARED_FILE}'"
   CONTENT=$(cat "${SHARED_FILE}")

@@ -107,6 +107,19 @@ async function runPythonCommand(doc: vscode.TextDocument, outputPath: string): P
   await waitForFileContains(outputPath, 'ext-ok', 10000);
 }
 
+async function waitForSearchEditorResults(expectedFragments: string[], timeoutMs: number): Promise<string> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const text = vscode.window.activeTextEditor?.document.getText() ?? '';
+    if (expectedFragments.every((fragment) => text.includes(fragment))) {
+      return text;
+    }
+    await delay(500);
+  }
+
+  throw new Error(`Timed out waiting for search editor results: ${expectedFragments.join(', ')}`);
+}
+
 suite('VSCode core dev loop on wsfs', () => {
   test('runs the core workflow in one session', async function () {
     this.timeout(180000);
@@ -175,6 +188,33 @@ suite('VSCode core dev loop on wsfs', () => {
     await fs.promises.writeFile(path.join(deleteDir.fsPath, 'root.txt'), 'delete-me\n', 'utf8');
     await vscode.workspace.fs.delete(deleteDir, { recursive: true, useTrash: false });
     assert.ok(!fs.existsSync(deleteDir.fsPath), 'delete-dir should be deleted recursively');
+
+    // Find in Files / ripgrep-backed workspace search
+    const searchRoot = path.join(workspaceRoot, 'search-fixtures');
+    const searchToken = 'wsfs-find-in-files-hit';
+    await writeFile(path.join(searchRoot, 'src', 'alpha.py'), `print(${JSON.stringify(searchToken)})\n`);
+    await writeFile(path.join(searchRoot, 'src', 'beta.ts'), `export const token = ${JSON.stringify(searchToken)};\n`);
+    await writeFile(path.join(searchRoot, 'notes.md'), 'no search hit here\n');
+    await delay(1000);
+
+    const commands = await vscode.commands.getCommands(true);
+    assert.ok(commands.includes('search.action.openNewEditor'), 'search.action.openNewEditor should be available');
+
+    await vscode.commands.executeCommand('search.action.openNewEditor', {
+      query: searchToken,
+      filesToInclude: 'search-fixtures',
+      triggerSearch: true,
+      focusResults: false
+    });
+
+    const searchEditorText = await waitForSearchEditorResults([
+      'search-fixtures/src/alpha.py',
+      'search-fixtures/src/beta.ts'
+    ], 30000);
+    assert.ok(
+      !searchEditorText.includes('search-fixtures/notes.md'),
+      'search editor should not report files without matches'
+    );
 
     // Python extension command execution
     await removeIfExists(outputExtTxt);

@@ -275,6 +275,34 @@ func (c *WorkspaceFilesClient) Stat(ctx context.Context, filePath string) (fs.Fi
 	return nil, fs.ErrNotExist
 }
 
+func (c *WorkspaceFilesClient) StatFresh(ctx context.Context, filePath string) (fs.FileInfo, error) {
+	info, err := c.statFreshInternal(ctx, filePath)
+	if err == nil {
+		return info, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+
+	info, err = c.statNotebookBySourceAliasFresh(ctx, filePath)
+	if err == nil {
+		return info, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+
+	info, err = c.statNotebookByFallbackAliasFresh(ctx, filePath)
+	if err == nil {
+		return info, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+
+	return nil, fs.ErrNotExist
+}
+
 func (c *WorkspaceFilesClient) statNotebookBySourceAlias(ctx context.Context, filePath string) (fs.FileInfo, error) {
 	actualPath, language, ok := pathutil.NotebookRemotePathFromSourcePath(filePath)
 	if !ok {
@@ -326,8 +354,83 @@ func (c *WorkspaceFilesClient) statNotebookByFallbackAlias(ctx context.Context, 
 	return nil, fs.ErrNotExist
 }
 
+func (c *WorkspaceFilesClient) statFreshInternal(ctx context.Context, filePath string) (fs.FileInfo, error) {
+	c.cache.Invalidate(filePath)
+	return c.statFromBackend(ctx, filePath)
+}
+
+func (c *WorkspaceFilesClient) statNotebookBySourceAliasFresh(ctx context.Context, filePath string) (fs.FileInfo, error) {
+	actualPath, language, ok := pathutil.NotebookRemotePathFromSourcePath(filePath)
+	if !ok {
+		return nil, fs.ErrNotExist
+	}
+
+	c.cache.Invalidate(filePath)
+	info, err := c.statFreshInternal(ctx, actualPath)
+	if err != nil {
+		return nil, err
+	}
+
+	wsInfo, ok := toWSFileInfo(info)
+	if !ok || !wsInfo.IsNotebook() || wsInfo.Language != language {
+		return nil, fs.ErrNotExist
+	}
+
+	return wsInfo, nil
+}
+
+func (c *WorkspaceFilesClient) statNotebookByFallbackAliasFresh(ctx context.Context, filePath string) (fs.FileInfo, error) {
+	actualPath, ok := pathutil.NotebookRemotePathFromFallbackPath(filePath)
+	if !ok {
+		return nil, fs.ErrNotExist
+	}
+
+	c.cache.Invalidate(filePath)
+	info, err := c.statFreshInternal(ctx, actualPath)
+	if err != nil {
+		return nil, err
+	}
+
+	wsInfo, ok := toWSFileInfo(info)
+	if !ok || !wsInfo.IsNotebook() {
+		return nil, fs.ErrNotExist
+	}
+
+	preferredVisiblePath := pathutil.NotebookVisiblePath(wsInfo.Path, wsInfo.Language)
+	if preferredVisiblePath == filePath {
+		return wsInfo, nil
+	}
+
+	collides, err := c.exactNonNotebookExistsFresh(ctx, preferredVisiblePath)
+	if err != nil {
+		return nil, err
+	}
+	if collides {
+		return wsInfo, nil
+	}
+
+	return nil, fs.ErrNotExist
+}
+
 func (c *WorkspaceFilesClient) exactNonNotebookExists(ctx context.Context, filePath string) (bool, error) {
 	info, err := c.statInternal(ctx, filePath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	wsInfo, ok := toWSFileInfo(info)
+	if !ok {
+		return true, nil
+	}
+
+	return !wsInfo.IsNotebook(), nil
+}
+
+func (c *WorkspaceFilesClient) exactNonNotebookExistsFresh(ctx context.Context, filePath string) (bool, error) {
+	info, err := c.statFreshInternal(ctx, filePath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
@@ -732,11 +835,19 @@ func (c *WorkspaceFilesClient) Write(ctx context.Context, filepath string, data 
 		}
 		c.cache.Invalidate(filepath)
 		c.cache.Invalidate(wsInfo.Path)
+
+		var writeErr error
 		if wsInfo.IsNotebook() {
 			logging.Debugf("Writing to notebook: %s", filepath)
-			return c.writeNotebookSource(ctx, wsInfo.Path, wsInfo.Language, data)
+			writeErr = c.writeNotebookSource(ctx, wsInfo.Path, wsInfo.Language, data)
+		} else {
+			writeErr = c.writeRegularFile(ctx, wsInfo.Path, data)
 		}
-		return c.writeRegularFile(ctx, wsInfo.Path, data)
+		if writeErr == nil {
+			c.cache.Invalidate(filepath)
+			c.cache.Invalidate(wsInfo.Path)
+		}
+		return writeErr
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		return err
@@ -746,11 +857,20 @@ func (c *WorkspaceFilesClient) Write(ctx context.Context, filepath string, data 
 		c.cache.Invalidate(filepath)
 		c.cache.Invalidate(actualPath)
 		logging.Debugf("Creating new notebook: %s", filepath)
-		return c.writeNotebookSource(ctx, actualPath, language, data)
+		writeErr := c.writeNotebookSource(ctx, actualPath, language, data)
+		if writeErr == nil {
+			c.cache.Invalidate(filepath)
+			c.cache.Invalidate(actualPath)
+		}
+		return writeErr
 	}
 
 	c.cache.Invalidate(filepath)
-	return c.writeRegularFile(ctx, filepath, data)
+	writeErr := c.writeRegularFile(ctx, filepath, data)
+	if writeErr == nil {
+		c.cache.Invalidate(filepath)
+	}
+	return writeErr
 }
 
 func (c *WorkspaceFilesClient) Delete(ctx context.Context, filePath string, recursive bool) error {

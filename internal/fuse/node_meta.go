@@ -22,6 +22,22 @@ func fileInfoChanged(oldInfo, newInfo databricks.WSFileInfo) bool {
 		oldInfo.Path != newInfo.Path
 }
 
+func (n *WSNode) metadataFreshLocked() bool {
+	if n.metadataCheckedAt.IsZero() {
+		return false
+	}
+
+	ttl := time.Second
+	if n.wfClient != nil {
+		ttl = n.wfClient.MetadataTTL()
+	}
+	if ttl <= 0 {
+		ttl = time.Second
+	}
+
+	return time.Since(n.metadataCheckedAt) < ttl
+}
+
 func (n *WSNode) refreshMetadataLocked(ctx context.Context, bypassCache bool) (bool, syscall.Errno) {
 	if n.isDirtyLocked() {
 		return false, 0
@@ -33,17 +49,13 @@ func (n *WSNode) refreshMetadataLocked(ctx context.Context, bypassCache bool) (b
 		return false, 0
 	}
 
-	ttl := n.wfClient.MetadataTTL()
-	if ttl <= 0 {
-		ttl = time.Second
-	}
 	if n.metadataCheckedAt.IsZero() {
 		if !bypassCache {
 			n.metadataCheckedAt = time.Now()
 			return false, 0
 		}
 	}
-	if !bypassCache && !n.metadataCheckedAt.IsZero() && time.Since(n.metadataCheckedAt) < ttl {
+	if !bypassCache && n.metadataFreshLocked() {
 		return false, 0
 	}
 	if bypassCache {

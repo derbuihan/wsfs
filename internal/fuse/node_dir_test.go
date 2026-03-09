@@ -68,6 +68,46 @@ func TestWSNodeLookupUsesDirtyChild(t *testing.T) {
 	}
 }
 
+func TestWSNodeLookupUsesCleanChildWithinTTL(t *testing.T) {
+	calls := 0
+	api := &databricks.FakeWorkspaceAPI{
+		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			calls++
+			return databricks.NewTestFileInfo(filePath, 12, false), nil
+		},
+	}
+	root := newTestRootNode(t, api)
+	ctx := context.Background()
+
+	childNode := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/file.txt",
+			Size:       12,
+			ModifiedAt: time.Now().UnixMilli(),
+		}},
+		metadataCheckedAt: time.Now(),
+	}
+	childInode := root.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno(childNode.fileInfo)})
+	root.AddChild("file.txt", childInode, false)
+
+	out := &fuse.EntryOut{}
+	inode, errno := root.Lookup(ctx, "file.txt", out)
+	if errno != 0 {
+		t.Fatalf("Lookup errno: %d", errno)
+	}
+	if inode != childInode {
+		t.Fatalf("expected existing inode")
+	}
+	if calls != 0 {
+		t.Fatalf("expected no Stat calls, got %d", calls)
+	}
+	if out.Attr.Size != 12 {
+		t.Fatalf("expected size 12, got %d", out.Attr.Size)
+	}
+}
+
 func TestWSNodeLookupErrors(t *testing.T) {
 	api := &databricks.FakeWorkspaceAPI{
 		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
@@ -622,9 +662,25 @@ func TestWSNodeCreateStatError(t *testing.T) {
 	}
 	root := newTestRootNode(t, api)
 	out := &fuse.EntryOut{}
-	_, _, _, errno := root.Create(context.Background(), "file.txt", 0, 0644, out)
-	if errno != syscall.EIO {
-		t.Fatalf("expected EIO, got %d", errno)
+	child, fh, flags, errno := root.Create(context.Background(), "file.txt", 0, 0644, out)
+	if errno != 0 {
+		t.Fatalf("expected create fallback success, got errno=%d", errno)
+	}
+	if child == nil || fh == nil {
+		t.Fatalf("expected non-nil child and file handle, got child=%v fh=%v", child, fh)
+	}
+	if flags != fuse.FOPEN_KEEP_CACHE {
+		t.Fatalf("expected KEEP_CACHE, got %d", flags)
+	}
+	childNode := child.Operations().(*WSNode)
+	if childNode.fileInfo.Path != "/file.txt" {
+		t.Fatalf("expected fallback path /file.txt, got %s", childNode.fileInfo.Path)
+	}
+	if childNode.fileInfo.Size() != 0 {
+		t.Fatalf("expected fallback size 0, got %d", childNode.fileInfo.Size())
+	}
+	if childNode.fileInfo.ObjectType != workspace.ObjectTypeFile {
+		t.Fatalf("expected fallback object type FILE, got %s", childNode.fileInfo.ObjectType)
 	}
 }
 

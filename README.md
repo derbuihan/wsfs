@@ -24,7 +24,7 @@ Notes:
 - Without `--allow-other`, the mount is owner-only. With `--allow-other`, other local users can access the mount through the same Databricks token.
 - `stat(2)` reports the mount owner's UID/GID and synthetic mode bits (`0644` files, `0755` directories).
 - `Statfs` returns synthetic but stable values.
-- Read-only opens on clean regular files revalidate remote metadata and drop stale clean cache state when the remote file changed.
+- Clean regular files reuse metadata within the metadata TTL window (10s by default); after the TTL expires, the next `Lookup`/`Getattr`/read-only `Open` rechecks remote metadata and drops stale clean cache state if the remote file changed.
 - `Flush`/`Fsync`/`Release` write back dirty buffers; `Release` also drops clean in-memory buffers after the last close.
 - Creating `foo.py` creates a Python notebook named `foo` in Databricks. Creating `foo.ipynb` creates a regular workspace file named `foo.ipynb`.
 
@@ -72,6 +72,9 @@ Useful variants:
 # Run a single command instead of opening a shell
 ./scripts/run_wsfs_docker.sh -- 'find /mnt/wsfs -maxdepth 2 -type f | head'
 ```
+
+For search-heavy editors, prefer mounting only the subtree you are actively working in instead of opening the whole workspace root.
+For example, mount `--remote-path=/Users/user@example.com/project` and open that mount in VSCode rather than `/mnt/wsfs` with every user/repo underneath it.
 
 Notes:
 - The FUSE mount is inside the container, not directly on the host filesystem.
@@ -163,13 +166,54 @@ There are no cache tuning flags. The goal is that `./scripts/run_wsfs_docker.sh`
 ### Cache Behavior
 
 - Directory metadata is reused for short TTL windows so shells and editors do not re-fetch the same listings on every lookup.
-- Clean regular files are revalidated against remote metadata on read-only open.
-- If remote metadata changed, wsfs drops the clean buffer, invalidates related metadata/content cache state, and avoids stale kernel page-cache reuse for that open.
+- Clean regular files reuse metadata and kernel cache within the metadata TTL window (`10s` by default). Once the TTL expires, the next `Lookup`/`Getattr`/read-only `Open` rechecks remote metadata.
+- If that metadata changed, wsfs drops the clean buffer, invalidates related metadata/content cache state, and avoids stale kernel page-cache reuse for that open.
 - File contents are cached on disk after the first read and reused until the entry is invalidated or evicted.
 - Missing or corrupt disk cache files are invalidated and retried from Databricks once instead of immediately surfacing `EIO`.
 - Local write, rename, delete, and mkdir/rmdir paths invalidate related metadata and content cache entries.
 - Disk cache entries are stored under `$XDG_CACHE_HOME/wsfs`, or `~/.cache/wsfs` when `XDG_CACHE_HOME` is unset.
 - Cache directory permissions are `0700`; cache files are `0600`.
+
+### Search-Heavy Editor Recommendations
+
+Workspace scans are fastest when you combine a narrow mount (`--remote-path`) with editor exclusions for generated or dependency-heavy directories.
+
+Recommended `.vscode/settings.json` for wsfs-backed workspaces:
+
+```json
+{
+  "search.exclude": {
+    "**/.git": true,
+    "**/node_modules": true,
+    "**/.venv": true,
+    "**/dist": true,
+    "**/build": true,
+    "**/target": true,
+    "**/__pycache__": true,
+    "**/.pytest_cache": true
+  },
+  "files.exclude": {
+    "**/.git": true,
+    "**/node_modules": true,
+    "**/.venv": true,
+    "**/dist": true,
+    "**/build": true,
+    "**/target": true,
+    "**/__pycache__": true,
+    "**/.pytest_cache": true
+  },
+  "files.watcherExclude": {
+    "**/.git/**": true,
+    "**/node_modules/**": true,
+    "**/.venv/**": true,
+    "**/dist/**": true,
+    "**/build/**": true,
+    "**/target/**": true,
+    "**/__pycache__/**": true,
+    "**/.pytest_cache/**": true
+  }
+}
+```
 
 ### Cache Monitoring
 
@@ -216,6 +260,7 @@ go test ./...
 | **Cache tests** | `scripts/tests/cache_test.sh` | Default cache population, invalidation, and out-of-band remote refresh checks |
 | **Stress tests** | `scripts/tests/stress_test.sh` | Concurrent access, rapid truncate, rename |
 | **Security / allow-other** | `scripts/tests/security_test.sh` | Validates `--allow-other` exposure semantics with a second local user |
+| **`rg` diagnostic** | `scripts/tests/rg_diagnostic.sh` | Prints cold/warm ripgrep timings and recent debug-log excerpts for mounted search workloads |
 | **Docker shell** | `scripts/run_wsfs_docker.sh` | Common Docker wrapper that builds, mounts, and runs a shell or command |
 | **Docker integration wrapper** | `scripts/test_docker.sh` | Runs the standard integration suites, including a separate `--allow-other` security stage |
 | **VSCode core dev loop** | `scripts/test_vscode_docker.sh` | Runs the VSCode E2E project in `scripts/tests/vscode/` |
@@ -228,6 +273,9 @@ go test ./...
 
 # Run shell suites against an existing mount
 ./scripts/tests/run.sh /mnt/wsfs --fuse-only
+
+# Print cold/warm ripgrep diagnostics against a mounted tree
+./scripts/tests/rg_diagnostic.sh /mnt/wsfs /tmp/wsfs.log
 
 # Run specific Docker-backed test suites
 ./scripts/test_docker.sh --fuse-only

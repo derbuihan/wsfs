@@ -45,7 +45,8 @@ wsfs always uses two cache layers:
 
 Important details:
 
-- Clean read-only `Open` forces a remote metadata recheck even if the metadata TTL has not expired yet.
+- Clean read-only `Open` reuses cached metadata while the metadata TTL is still fresh (`10s` by default).
+- Once the metadata TTL expires, the next `Lookup` / `Getattr` / read-only `Open` rechecks remote metadata.
 - If that metadata changed, wsfs:
   - drops any clean in-memory buffer
   - invalidates related disk-cache entries
@@ -53,7 +54,13 @@ Important details:
 - Missing or checksum-mismatched disk-cache files are invalidated and re-fetched once before read/write fails.
 - Local write, rename, delete, mkdir, and rmdir invalidate relevant metadata and content-cache state.
 
-This behavior is designed to make editor reopen/save loops more reliable, especially in VSCode.
+This behavior is designed to keep search/indexing throughput reasonable for VSCode and `rg` while accepting a short TTL-sized stale window for out-of-band remote changes.
+
+## Search-heavy workloads
+
+- Prefer mounting a narrow subtree with `--remote-path` instead of opening the whole workspace root in your editor.
+- Exclude dependency, build, and cache directories in editor settings (`.git`, `node_modules`, `.venv`, `dist`, `build`, `target`, `__pycache__`, `.pytest_cache`).
+- Expect out-of-band remote overwrites to become visible after the metadata TTL boundary rather than on every read-only reopen.
 
 ## Notebook source view
 

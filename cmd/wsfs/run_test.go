@@ -58,6 +58,10 @@ func (f *fakeWorkspaceFilesClient) Stat(ctx context.Context, filePath string) (i
 	return databricks.NewTestFileInfo(filePath, 0, true), nil
 }
 
+func (f *fakeWorkspaceFilesClient) StatFresh(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+	return f.Stat(ctx, filePath)
+}
+
 func (f *fakeWorkspaceFilesClient) ReadDir(ctx context.Context, dirPath string) ([]iofs.DirEntry, error) {
 	return nil, nil
 }

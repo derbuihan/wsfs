@@ -17,7 +17,37 @@ fi
 mkdir -p "${WORKSPACE_DIR}/.vscode"
 cat > "${WORKSPACE_DIR}/.vscode/settings.json" <<'SETTINGS'
 {
-  "python.defaultInterpreterPath": "/usr/bin/python3"
+  "python.defaultInterpreterPath": "/usr/bin/python3",
+  "search.exclude": {
+    "**/.git": true,
+    "**/node_modules": true,
+    "**/.venv": true,
+    "**/dist": true,
+    "**/build": true,
+    "**/target": true,
+    "**/__pycache__": true,
+    "**/.pytest_cache": true
+  },
+  "files.exclude": {
+    "**/.git": true,
+    "**/node_modules": true,
+    "**/.venv": true,
+    "**/dist": true,
+    "**/build": true,
+    "**/target": true,
+    "**/__pycache__": true,
+    "**/.pytest_cache": true
+  },
+  "files.watcherExclude": {
+    "**/.git/**": true,
+    "**/node_modules/**": true,
+    "**/.venv/**": true,
+    "**/dist/**": true,
+    "**/build/**": true,
+    "**/target/**": true,
+    "**/__pycache__/**": true,
+    "**/.pytest_cache/**": true
+  }
 }
 SETTINGS
 

@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/databricks/databricks-sdk-go/service/workspace"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
@@ -119,9 +120,9 @@ func refreshRenamedNode(ctx context.Context, wfClient databricks.WorkspaceFilesA
 		return
 	}
 
-	info, err := wfClient.Stat(ctx, visiblePath)
+	info, err := wfClient.StatFresh(ctx, visiblePath)
 	if err != nil {
-		info, err = wfClient.Stat(ctx, actualPath)
+		info, err = wfClient.StatFresh(ctx, actualPath)
 		if err != nil {
 			logging.Debugf("Rename: failed to refresh node info for %s: %v", visiblePath, err)
 			return
@@ -141,6 +142,22 @@ func refreshRenamedNode(ctx context.Context, wfClient databricks.WorkspaceFilesA
 	node.metadataCheckedAt = time.Now()
 	node.resetBufferLocked()
 	node.buf.ReplaceOnFirstWrite = false
+}
+
+func synthesizedCreatedFileInfo(childPath string, initialContent []byte) databricks.WSFileInfo {
+	now := time.Now()
+	info := databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+		Path:       childPath,
+		ObjectType: workspace.ObjectTypeFile,
+		Size:       int64(len(initialContent)),
+		ModifiedAt: now.UnixMilli(),
+	}}
+	if actualPath, language, ok := pathutil.NotebookRemotePathFromSourcePath(childPath); ok {
+		info.ObjectInfo.Path = actualPath
+		info.ObjectInfo.ObjectType = workspace.ObjectTypeNotebook
+		info.ObjectInfo.Language = language
+	}
+	return info
 }
 
 func notifyContentIfPossible(inode *fs.Inode, path string) {
@@ -225,7 +242,7 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 		existingNode, ok := existingChild.Operations().(*WSNode)
 		if ok {
 			existingNode.mu.Lock()
-			if existingNode.isDirtyLocked() {
+			if existingNode.isDirtyLocked() || existingNode.metadataFreshLocked() {
 				// Use existing node's state - it has uncommitted changes
 				existingNode.fillAttr(ctx, &out.Attr)
 				if existingNode.buf.Data != nil {
@@ -235,7 +252,7 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 				existingNode.mu.Unlock()
 				out.SetEntryTimeout(entryTimeoutSec)
 				out.SetAttrTimeout(attrTimeoutSec)
-				logging.Debugf("Lookup: returning existing dirty node for %s", childPath)
+				logging.Debugf("Lookup: returning existing cached node for %s", childPath)
 				return existingChild, 0
 			}
 			existingNode.mu.Unlock()
@@ -323,16 +340,16 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 		return nil, nil, 0, errnoFromBackendError(backendOpCreate, err)
 	}
 
-	info, err := n.wfClient.Stat(opCtx, childPath)
+	info, err := n.wfClient.StatFresh(opCtx, childPath)
+	wsInfo, ok := info.(databricks.WSFileInfo)
 	if err != nil {
 		logging.Warnf("Error stating new file %s: %v", childPath, err)
-		return nil, nil, 0, syscall.EIO
-	}
-
-	wsInfo, ok := info.(databricks.WSFileInfo)
-	if !ok {
+		wsInfo = synthesizedCreatedFileInfo(childPath, initialContent)
+		ok = true
+	} else if !ok {
 		logging.Debugf("Create: unexpected file info type for %s", childPath)
-		return nil, nil, 0, syscall.EIO
+		wsInfo = synthesizedCreatedFileInfo(childPath, initialContent)
+		ok = true
 	}
 	childNode := &WSNode{
 		wfClient:                  n.wfClient,

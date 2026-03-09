@@ -183,12 +183,20 @@ func (n *WSNode) truncateLocked(size uint64) {
 	n.markDirtyLocked(dirtyTruncate)
 }
 
+func (n *WSNode) applyBufferedMetadataFallbackLocked(now time.Time) {
+	if n.buf.Data != nil {
+		n.fileInfo.ObjectInfo.Size = int64(len(n.buf.Data))
+	}
+	n.markModifiedLocked(now)
+	n.metadataCheckedAt = now
+}
+
 func (n *WSNode) flushLocked(ctx context.Context) syscall.Errno {
 	if !n.isDirtyLocked() || n.buf.Data == nil {
 		return 0
 	}
 
-	// Apply timeout for write and stat operations
+	// Apply timeout for write and metadata refresh operations.
 	opCtx, cancel := context.WithTimeout(ctx, dataOpTimeout)
 	defer cancel()
 
@@ -200,18 +208,16 @@ func (n *WSNode) flushLocked(ctx context.Context) syscall.Errno {
 	}
 	n.clearDirtyLocked()
 
-	info, err := n.wfClient.Stat(opCtx, remotePath)
-	if err != nil {
+	if info, err := n.wfClient.StatFresh(opCtx, remotePath); err != nil {
 		logging.Warnf("Error refreshing file info after Flush for %s: %v", remotePath, err)
-		return 0
-	}
-	wsInfo, ok := info.(databricks.WSFileInfo)
-	if !ok {
+		n.applyBufferedMetadataFallbackLocked(time.Now())
+	} else if wsInfo, ok := info.(databricks.WSFileInfo); !ok {
 		logging.Warnf("Unexpected file info type after Flush for %s", remotePath)
-		return 0
+		n.applyBufferedMetadataFallbackLocked(time.Now())
+	} else {
+		n.fileInfo = wsInfo
+		n.metadataCheckedAt = time.Now()
 	}
-	n.fileInfo = wsInfo
-	n.metadataCheckedAt = time.Now()
 
 	// Update cache with new content
 	if n.diskCache != nil && !n.diskCache.IsDisabled() && n.buf.Data != nil {
@@ -237,8 +243,7 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 	}
 
 	metadataChanged := false
-	forceFreshnessCheck := !n.isDirtyLocked() && flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_TRUNC) == 0
-	if changed, errno := n.refreshMetadataLocked(ctx, forceFreshnessCheck); errno != 0 {
+	if changed, errno := n.refreshMetadataLocked(ctx, false); errno != 0 {
 		return nil, 0, errno
 	} else {
 		metadataChanged = changed

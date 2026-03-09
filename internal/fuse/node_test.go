@@ -328,6 +328,153 @@ func TestWSNodeRelease(t *testing.T) {
 	}
 }
 
+func TestReleaseUsesStatFreshForImmediateLookupAndRead(t *testing.T) {
+	cache, err := filecache.NewDiskCache(t.TempDir(), 1024*1024, time.Hour)
+	if err != nil {
+		t.Fatalf("cache init: %v", err)
+	}
+
+	freshSize := int64(0)
+	freshModTime := time.Now()
+	writtenData := []byte("shared content")
+	statCalls := 0
+	statFreshCalls := 0
+
+	api := &databricks.FakeWorkspaceAPI{
+		ReadAllFunc: func(ctx context.Context, filePath string) ([]byte, error) {
+			return []byte{}, nil
+		},
+		WriteFunc: func(ctx context.Context, filepath string, data []byte) error {
+			freshSize = int64(len(data))
+			freshModTime = time.Now()
+			return nil
+		},
+		StatFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			statCalls++
+			return databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+				Path:       filePath,
+				ObjectType: workspace.ObjectTypeFile,
+				Size:       0,
+				ModifiedAt: freshModTime.Add(-time.Second).UnixMilli(),
+			}}, nil
+		},
+		StatFreshFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			statFreshCalls++
+			return databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+				Path:       filePath,
+				ObjectType: workspace.ObjectTypeFile,
+				Size:       freshSize,
+				ModifiedAt: freshModTime.UnixMilli(),
+			}}, nil
+		},
+	}
+
+	root := newTestRootNode(t, api)
+	root.diskCache = cache
+
+	createOut := &fuse.EntryOut{}
+	inode, _, _, errno := root.Create(context.Background(), "shared.txt", 0, 0644, createOut)
+	if errno != 0 {
+		t.Fatalf("Create failed with errno: %d", errno)
+	}
+	root.AddChild("shared.txt", inode, false)
+	child := inode.Operations().(*WSNode)
+
+	if written, errno := child.Write(context.Background(), nil, writtenData, 0); errno != 0 {
+		t.Fatalf("Write failed with errno: %d", errno)
+	} else if written != uint32(len(writtenData)) {
+		t.Fatalf("expected %d bytes written, got %d", len(writtenData), written)
+	}
+
+	if errno := child.Release(context.Background(), nil); errno != 0 {
+		t.Fatalf("Release failed with errno: %d", errno)
+	}
+	if statCalls != 0 {
+		t.Fatalf("expected stale Stat path to be unused, got %d calls", statCalls)
+	}
+	if statFreshCalls < 2 {
+		t.Fatalf("expected StatFresh to be used for create and flush, got %d calls", statFreshCalls)
+	}
+	if child.fileInfo.Size() != int64(len(writtenData)) {
+		t.Fatalf("expected child size %d after flush, got %d", len(writtenData), child.fileInfo.Size())
+	}
+
+	lookupOut := &fuse.EntryOut{}
+	lookedUp, errno := root.Lookup(context.Background(), "shared.txt", lookupOut)
+	if errno != 0 {
+		t.Fatalf("Lookup failed with errno: %d", errno)
+	}
+	if lookedUp != inode {
+		t.Fatal("expected lookup to reuse existing child inode")
+	}
+	if lookupOut.Attr.Size != uint64(len(writtenData)) {
+		t.Fatalf("expected lookup size %d, got %d", len(writtenData), lookupOut.Attr.Size)
+	}
+
+	if _, _, errno := child.Open(context.Background(), 0); errno != 0 {
+		t.Fatalf("Open failed with errno: %d", errno)
+	}
+	result, errno := child.Read(context.Background(), nil, make([]byte, len(writtenData)), 0)
+	if errno != 0 {
+		t.Fatalf("Read failed with errno: %d", errno)
+	}
+	data, _ := result.Bytes(nil)
+	if string(data) != string(writtenData) {
+		t.Fatalf("expected read data %q, got %q", string(writtenData), string(data))
+	}
+}
+
+func TestReleaseFallsBackToLocalMetadataWhenStatFreshFails(t *testing.T) {
+	writtenData := []byte("content")
+	oldModifiedAt := time.Now().Add(-time.Hour).UnixMilli()
+	writeCalls := 0
+
+	api := &databricks.FakeWorkspaceAPI{
+		WriteFunc: func(ctx context.Context, filepath string, data []byte) error {
+			writeCalls++
+			return nil
+		},
+		StatFreshFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			return nil, fs.ErrPermission
+		},
+	}
+
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+			Size:       0,
+			ModifiedAt: oldModifiedAt,
+		}},
+		buf:       fileBuffer{Data: append([]byte(nil), writtenData...), Dirty: true},
+		openCount: 1,
+	}
+
+	before := time.Now()
+	if errno := n.Release(context.Background(), nil); errno != 0 {
+		t.Fatalf("Release failed with errno: %d", errno)
+	}
+	if writeCalls != 1 {
+		t.Fatalf("expected 1 write call, got %d", writeCalls)
+	}
+	if n.fileInfo.Size() != int64(len(writtenData)) {
+		t.Fatalf("expected size %d after fallback, got %d", len(writtenData), n.fileInfo.Size())
+	}
+	if n.fileInfo.ModifiedAt <= oldModifiedAt {
+		t.Fatalf("expected modified time to advance, got %d <= %d", n.fileInfo.ModifiedAt, oldModifiedAt)
+	}
+	if n.metadataCheckedAt.Before(before) {
+		t.Fatalf("expected metadataCheckedAt to update, got %v before %v", n.metadataCheckedAt, before)
+	}
+	if n.buf.Data != nil {
+		t.Fatal("expected buffer to be cleared after release")
+	}
+	if n.buf.Dirty {
+		t.Fatal("expected dirty flag cleared after release")
+	}
+}
+
 // TestOpenReleaseFlushesWhenLastHandleClosed verifies flush happens only on last close.
 func TestOpenReleaseFlushesWhenLastHandleClosed(t *testing.T) {
 	var writeCalls int
@@ -1109,6 +1256,53 @@ func TestOpenDetectsRemoteModification(t *testing.T) {
 	}
 }
 
+func TestOpenReadOnlyWithinTTLUsesCachedMetadata(t *testing.T) {
+	modTime := time.Now()
+	content := []byte("cached content")
+	statCalls := 0
+
+	api := &databricks.FakeWorkspaceAPI{
+		StatFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			statCalls++
+			return databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+				ObjectType: workspace.ObjectTypeFile,
+				Path:       "/test.txt",
+				Size:       int64(len(content)),
+				ModifiedAt: modTime.UnixMilli(),
+			}}, nil
+		},
+	}
+
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+			Size:       int64(len(content)),
+			ModifiedAt: modTime.UnixMilli(),
+		}},
+		buf:               fileBuffer{Data: content, Dirty: false},
+		metadataCheckedAt: time.Now(),
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		_, openFlags, errno := n.Open(context.Background(), 0)
+		if errno != 0 {
+			t.Fatalf("Open failed with errno: %d", errno)
+		}
+		if openFlags&fuse.FOPEN_KEEP_CACHE == 0 {
+			t.Fatalf("expected KEEP_CACHE for warm read-only open, got flags=%d", openFlags)
+		}
+	}
+
+	if statCalls != 0 {
+		t.Fatalf("expected no Stat calls within metadata TTL, got %d", statCalls)
+	}
+	if string(n.buf.Data) != string(content) {
+		t.Fatalf("expected clean buffer to be preserved")
+	}
+}
+
 // TestOpenPreservesDirtyBuffer verifies that Open() does not invalidate dirty buffer
 func TestOpenPreservesDirtyBuffer(t *testing.T) {
 	originalTime := time.Now().Add(-1 * time.Hour)
@@ -1161,10 +1355,12 @@ func TestOpenPreservesDirtyBuffer(t *testing.T) {
 func TestOpenNoChangeWhenRemoteNotModified(t *testing.T) {
 	sameTime := time.Now()
 	originalData := []byte("original content")
+	statCalls := 0
 	readAllCalled := false
 
 	api := &databricks.FakeWorkspaceAPI{
 		StatFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			statCalls++
 			return databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
 				ObjectType: workspace.ObjectTypeFile,
 				Path:       "/test.txt",
@@ -1206,6 +1402,9 @@ func TestOpenNoChangeWhenRemoteNotModified(t *testing.T) {
 	// ReadAll should not be called since remote is unchanged
 	if readAllCalled {
 		t.Error("Expected ReadAll not to be called when remote is unchanged")
+	}
+	if statCalls != 1 {
+		t.Errorf("expected one Stat call after metadata TTL expiry, got %d", statCalls)
 	}
 }
 
@@ -1686,5 +1885,74 @@ func TestEnsureDataLockedWithValidCache(t *testing.T) {
 	// Verify that FileSize is set correctly
 	if n.buf.FileSize != int64(len(cachedData)) {
 		t.Errorf("Expected FileSize to be %d, got %d", len(cachedData), n.buf.FileSize)
+	}
+}
+
+func TestReadUsesWarmDiskCacheWithoutRemoteRead(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	cache, err := filecache.NewDiskCache(tmpDir, 1024*1024, 1*time.Hour)
+	if err != nil {
+		t.Fatalf("Failed to create disk cache: %v", err)
+	}
+
+	cachedData := []byte("cached content")
+	remotePath := "/test/file.txt"
+	modTime := time.Now()
+
+	if _, err := cache.Set(remotePath, cachedData, modTime); err != nil {
+		t.Fatalf("Failed to set cache: %v", err)
+	}
+
+	readAllCalls := 0
+	statCalls := 0
+	api := &databricks.FakeWorkspaceAPI{
+		StatFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			statCalls++
+			return databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+				ObjectType: workspace.ObjectTypeFile,
+				Path:       remotePath,
+				Size:       int64(len(cachedData)),
+				ModifiedAt: modTime.UnixMilli(),
+			}}, nil
+		},
+		ReadAllFunc: func(ctx context.Context, filePath string) ([]byte, error) {
+			readAllCalls++
+			return []byte("remote content"), nil
+		},
+	}
+
+	n := &WSNode{
+		wfClient:  api,
+		diskCache: cache,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       remotePath,
+			Size:       int64(len(cachedData)),
+			ModifiedAt: modTime.UnixMilli(),
+		}},
+		metadataCheckedAt: time.Now(),
+	}
+
+	if _, _, errno := n.Open(context.Background(), 0); errno != 0 {
+		t.Fatalf("Open failed: %d", errno)
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		result, errno := n.Read(context.Background(), nil, make([]byte, len(cachedData)), 0)
+		if errno != 0 {
+			t.Fatalf("Read failed: %d", errno)
+		}
+		data, _ := result.Bytes(nil)
+		if string(data) != string(cachedData) {
+			t.Fatalf("expected cached data %q, got %q", string(cachedData), string(data))
+		}
+	}
+
+	if readAllCalls != 0 {
+		t.Fatalf("expected no remote ReadAll calls, got %d", readAllCalls)
+	}
+	if statCalls != 0 {
+		t.Fatalf("expected no Stat calls within metadata TTL, got %d", statCalls)
 	}
 }

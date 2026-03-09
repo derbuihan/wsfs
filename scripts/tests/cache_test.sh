@@ -200,16 +200,19 @@ if [ -n "${DATABRICKS_HOST:-}" ] && [ -n "${DATABRICKS_TOKEN:-}" ]; then
     echo -e "${GREEN}✓ PASS:${NC} Remote overwrite API succeeded (HTTP $HTTP_CODE)"
     ((TEST_PASSED++)) || true
 
+    EARLY=$(cat sync_test1.txt)
+    assert_eq "original content" "$EARLY" "Immediate reopen/read stays on cached content inside the metadata TTL window"
+
     UPDATED=""
     for attempt in $(seq 1 15); do
+      sleep 1
       UPDATED=$(cat sync_test1.txt)
       if [ "$UPDATED" = "$NEW_CONTENT" ]; then
         break
       fi
-      sleep 1
     done
 
-    assert_eq "$NEW_CONTENT" "$UPDATED" "Reopen/read observes out-of-band remote overwrite without waiting for cache TTL expiry"
+    assert_eq "$NEW_CONTENT" "$UPDATED" "Reopen/read observes out-of-band remote overwrite after metadata TTL expiry"
   fi
 else
   skip_test "DATABRICKS_HOST/TOKEN not set, skipping remote sync tests"

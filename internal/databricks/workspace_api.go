@@ -10,6 +10,7 @@ import (
 // It allows swapping in test doubles without touching node logic.
 type WorkspaceFilesAPI interface {
 	Stat(ctx context.Context, filePath string) (fs.FileInfo, error)
+	StatFresh(ctx context.Context, filePath string) (fs.FileInfo, error)
 	ReadDir(ctx context.Context, dirPath string) ([]fs.DirEntry, error)
 	ReadAll(ctx context.Context, filePath string) ([]byte, error)
 	Write(ctx context.Context, filepath string, data []byte) error

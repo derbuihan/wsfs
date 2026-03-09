@@ -55,6 +55,11 @@
 - [x] リリース成果物を Linux-only に整理（unsupported な `darwin` archive を削除、README の `.deb` install/update を `apt install ./...` に更新）
 - [x] release artifact に third-party licenses を同梱（`go-licenses save` を release 前 hook に追加し、`tar.gz` / `.deb` に同梱）
 
+## 完了（2026-03-09）
+
+- [x] 検索/索引 workload を TTL ベース再検証へ変更（read-only open の forced revalidate 廃止、clean child Lookup 再利用、VSCode/rg 診断と docs 更新）
+- [x] `--allow-other` stale metadata 回帰を修正（local write 後は `StatFresh` で即時整合、post-write cache invalidate、Create fallback、security/stat 回帰テスト追加）
+
 ---
 
 ## 未対応（オプション）
