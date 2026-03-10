@@ -60,6 +60,13 @@
 - [x] 検索/索引 workload を TTL ベース再検証へ変更（read-only open の forced revalidate 廃止、clean child Lookup 再利用、VSCode/rg 診断と docs 更新）
 - [x] `--allow-other` stale metadata 回帰を修正（local write 後は `StatFresh` で即時整合、post-write cache invalidate、Create fallback、security/stat 回帰テスト追加）
 
+## 完了（2026-03-10）
+
+- [x] Databricks hidden `projects` API 調査メモを追加（`docs/projects-api-investigation.md`）
+- [x] Databricks hidden `projects` API を追加調査（`create` / `fetch-and-checkout` / `update` / `clone` / `delete` の実挙動確認）
+- [x] Databricks hidden `projects` API を追加深掘り（`status` / `diff` / `add` / `commit` 系 REST の不在と private GraphQL 境界を確認）
+- [x] Databricks hidden `/api/2.0/git` family を追加調査（`git` / `repo-git` / `project-git` / `git-ops` 系は `ENDPOINT_NOT_FOUND` を確認）
+
 ---
 
 ## 未対応（オプション）
