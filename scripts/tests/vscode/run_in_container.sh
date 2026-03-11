@@ -9,6 +9,46 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOUNT_POINT="${1:-/mnt/wsfs}"
 WORKSPACE_DIR="${MOUNT_POINT}/vscode_e2e_$(date +%s)"
 
+cleanup_workspace() {
+  local original_status="$1"
+  local cleanup_status=0
+  local attempt=1
+  local max_attempts=5
+
+  echo ""
+  echo "Cleaning up VSCode E2E workspace: ${WORKSPACE_DIR}"
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    cleanup_status=0
+    rm -rf -- "${WORKSPACE_DIR}" || cleanup_status=$?
+
+    if [ "$cleanup_status" -eq 0 ] && [ ! -e "${WORKSPACE_DIR}" ]; then
+      sleep 1
+      if [ ! -e "${WORKSPACE_DIR}" ]; then
+        echo "Cleaned up VSCode E2E workspace: ${WORKSPACE_DIR}"
+        return "$original_status"
+      fi
+    fi
+
+    echo "Cleanup retry ${attempt}/${max_attempts} for VSCode E2E workspace: ${WORKSPACE_DIR}" >&2
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+
+  echo "Failed to clean up VSCode E2E workspace: ${WORKSPACE_DIR}" >&2
+  if [ "$original_status" -eq 0 ]; then
+    return 1
+  fi
+  return "$original_status"
+}
+
+on_exit() {
+  local status=$?
+  cleanup_workspace "$status"
+}
+
+trap on_exit EXIT
+
 if [ ! -d "$MOUNT_POINT" ]; then
   echo "Error: mount point not found: $MOUNT_POINT" >&2
   exit 1

@@ -27,6 +27,13 @@ import (
 // Shutdown timeout for flushing dirty buffers
 const shutdownTimeout = 30 * time.Second
 
+const (
+	defaultMetadataTTL = 10 * time.Second
+	defaultAttrTTL     = 10 * time.Second
+	defaultEntryTTL    = 10 * time.Second
+	defaultNegativeTTL = 3 * time.Second
+)
+
 // cliConfig captures parsed command-line flags.
 type cliConfig struct {
 	showVersion bool
@@ -143,13 +150,15 @@ func buildNodeConfig(ownerUid uint32, ownerGid uint32, allowOther bool) *wsfsfus
 		OwnerUid:       ownerUid,
 		OwnerGid:       ownerGid,
 		RestrictAccess: !allowOther,
+		AttrTTL:        defaultAttrTTL,
+		EntryTTL:       defaultEntryTTL,
 	}
 }
 
 func buildMountOptions(allowOther bool, debug bool) *fs.Options {
-	attrTimeout := 10 * time.Second
-	entryTimeout := 10 * time.Second
-	negativeTimeout := 3 * time.Second
+	attrTimeout := defaultAttrTTL
+	entryTimeout := defaultEntryTTL
+	negativeTimeout := defaultNegativeTTL
 
 	opts := &fs.Options{
 		AttrTimeout:     &attrTimeout,

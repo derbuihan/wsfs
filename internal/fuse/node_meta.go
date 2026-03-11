@@ -15,8 +15,13 @@ import (
 )
 
 func fileInfoChanged(oldInfo, newInfo databricks.WSFileInfo) bool {
+	sizeChanged := oldInfo.Size() != newInfo.Size()
+	if oldInfo.IsNotebook() && newInfo.IsNotebook() && oldInfo.NotebookSizeComputed != newInfo.NotebookSizeComputed {
+		sizeChanged = false
+	}
+
 	return oldInfo.ModifiedAt != newInfo.ModifiedAt ||
-		oldInfo.Size() != newInfo.Size() ||
+		sizeChanged ||
 		oldInfo.ObjectId != newInfo.ObjectId ||
 		oldInfo.ResourceId != newInfo.ResourceId ||
 		oldInfo.Path != newInfo.Path
@@ -140,7 +145,7 @@ func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 		out.Attr.Blocks = (out.Attr.Size + blockFactor - 1) / blockFactor
 	}
 
-	out.SetTimeout(attrTimeoutSec)
+	out.SetTimeout(n.attrTimeout())
 
 	return 0
 }

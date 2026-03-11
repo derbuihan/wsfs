@@ -42,6 +42,21 @@ const (
 	defaultNegativeTTL = 3 * time.Second
 )
 
+type CacheConfig struct {
+	MetadataTTL time.Duration
+	NegativeTTL time.Duration
+}
+
+func (c CacheConfig) withDefaults() CacheConfig {
+	if c.MetadataTTL <= 0 {
+		c.MetadataTTL = defaultMetadataTTL
+	}
+	if c.NegativeTTL <= 0 {
+		c.NegativeTTL = defaultNegativeTTL
+	}
+	return c
+}
+
 // sanitizeURL removes query parameters from a URL to avoid exposing signed tokens
 func sanitizeURL(rawURL string) string {
 	parsed, err := url.Parse(rawURL)
@@ -228,17 +243,26 @@ type WorkspaceFilesClient struct {
 }
 
 func NewWorkspaceFilesClient(w *databricks.WorkspaceClient) (*WorkspaceFilesClient, error) {
+	return NewWorkspaceFilesClientWithConfig(w, CacheConfig{})
+}
+
+func NewWorkspaceFilesClientWithConfig(w *databricks.WorkspaceClient, cfg CacheConfig) (*WorkspaceFilesClient, error) {
 	databricksClient, err := client.New(w.Config)
 	if err != nil {
 		return nil, err
 	}
 
-	return NewWorkspaceFilesClientWithDeps(w.Workspace, databricksClient, nil), nil
+	return NewWorkspaceFilesClientWithDepsAndConfig(w.Workspace, databricksClient, nil, cfg), nil
 }
 
 func NewWorkspaceFilesClientWithDeps(workspaceClient workspaceClient, apiClient apiDoer, c *metacache.Cache) *WorkspaceFilesClient {
+	return NewWorkspaceFilesClientWithDepsAndConfig(workspaceClient, apiClient, c, CacheConfig{})
+}
+
+func NewWorkspaceFilesClientWithDepsAndConfig(workspaceClient workspaceClient, apiClient apiDoer, c *metacache.Cache, cfg CacheConfig) *WorkspaceFilesClient {
 	if c == nil {
-		c = metacache.NewCacheWithTTLs(defaultMetadataTTL, defaultNegativeTTL)
+		cfg = cfg.withDefaults()
+		c = metacache.NewCacheWithTTLs(cfg.MetadataTTL, cfg.NegativeTTL)
 	}
 	return &WorkspaceFilesClient{
 		workspaceClient: workspaceClient,
@@ -355,8 +379,28 @@ func (c *WorkspaceFilesClient) statNotebookByFallbackAlias(ctx context.Context, 
 }
 
 func (c *WorkspaceFilesClient) statFreshInternal(ctx context.Context, filePath string) (fs.FileInfo, error) {
+	var previousExact WSFileInfo
+	if cached, found := c.cache.Get(filePath); found && cached != nil {
+		if cachedInfo, ok := toWSFileInfo(cached); ok && cachedInfo.NotebookSizeComputed {
+			previousExact = cachedInfo
+		}
+	}
 	c.cache.Invalidate(filePath)
-	return c.statFromBackend(ctx, filePath)
+	info, err := c.statFromBackend(ctx, filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	wsInfo, ok := toWSFileInfo(info)
+	if !ok {
+		return info, nil
+	}
+
+	merged, changed := mergeNotebookExactSize(wsInfo, previousExact)
+	if changed {
+		c.cache.Set(filePath, merged)
+	}
+	return merged, nil
 }
 
 func (c *WorkspaceFilesClient) statNotebookBySourceAliasFresh(ctx context.Context, filePath string) (fs.FileInfo, error) {
@@ -463,26 +507,92 @@ func notebookVisibleName(info WSFileInfo, usedNames map[string]struct{}) (string
 	return fallback, true
 }
 
-func (c *WorkspaceFilesClient) completeNotebookSize(ctx context.Context, cacheKey string, info fs.FileInfo) (fs.FileInfo, error) {
+func sameNotebookIdentity(a, b WSFileInfo) bool {
+	if !a.IsNotebook() || !b.IsNotebook() {
+		return false
+	}
+	return a.Path == b.Path &&
+		a.ModifiedAt == b.ModifiedAt &&
+		a.ObjectId == b.ObjectId &&
+		a.ResourceId == b.ResourceId
+}
+
+func mergeNotebookExactSize(info WSFileInfo, exact WSFileInfo) (WSFileInfo, bool) {
+	if !info.IsNotebook() || !exact.IsNotebook() || !exact.NotebookSizeComputed {
+		return info, false
+	}
+	if !sameNotebookIdentity(info, exact) {
+		return info, false
+	}
+	if info.NotebookSizeComputed && info.Size() == exact.Size() {
+		return info, false
+	}
+	info.ObjectInfo.Size = exact.Size()
+	info.NotebookSizeComputed = true
+	return info, true
+}
+
+func (c *WorkspaceFilesClient) cachedExactNotebookInfo(cacheKey string, info WSFileInfo) (WSFileInfo, bool) {
+	candidates := []string{}
+	if info.Path != "" {
+		candidates = append(candidates, info.Path)
+	}
+	if cacheKey != "" && cacheKey != info.Path {
+		candidates = append(candidates, cacheKey)
+	}
+
+	for _, key := range candidates {
+		cached, found := c.cache.Get(key)
+		if !found || cached == nil {
+			continue
+		}
+		cachedInfo, ok := toWSFileInfo(cached)
+		if !ok || !cachedInfo.NotebookSizeComputed {
+			continue
+		}
+		if merged, ok := mergeNotebookExactSize(info, cachedInfo); ok {
+			return merged, true
+		}
+	}
+
+	return info, false
+}
+
+func (c *WorkspaceFilesClient) preserveNotebookExactSize(cacheKey string, info fs.FileInfo) fs.FileInfo {
 	wsInfo, ok := toWSFileInfo(info)
-	if !ok || !wsInfo.IsNotebook() || wsInfo.NotebookSizeComputed {
-		return info, nil
+	if !ok || !wsInfo.IsNotebook() {
+		return info
 	}
 
-	exportPath := wsInfo.Path
-	if exportPath == "" {
-		exportPath = cacheKey
-	}
-	size, err := c.notebookSize(ctx, exportPath)
-	if err != nil {
-		logging.Debugf("Failed to compute notebook size for %s: %s", cacheKey, sanitizeError(err))
-		return info, nil
+	merged, changed := c.cachedExactNotebookInfo(cacheKey, wsInfo)
+	if changed {
+		c.cache.Set(cacheKey, merged)
+		return merged
 	}
 
-	wsInfo.ObjectInfo.Size = size
-	wsInfo.NotebookSizeComputed = true
-	c.cache.Set(cacheKey, wsInfo)
-	return wsInfo, nil
+	return wsInfo
+}
+
+func (c *WorkspaceFilesClient) rememberNotebookExactSize(cacheKey string, info WSFileInfo, size int64) WSFileInfo {
+	if !info.IsNotebook() {
+		return info
+	}
+
+	info.ObjectInfo.Size = size
+	info.NotebookSizeComputed = true
+
+	keys := []string{}
+	if info.Path != "" {
+		keys = append(keys, info.Path)
+	}
+	if cacheKey != "" && cacheKey != info.Path {
+		keys = append(keys, cacheKey)
+	}
+	for _, key := range keys {
+		c.cache.Set(key, info)
+	}
+
+	return info
 }
 
 func (c *WorkspaceFilesClient) statFromBackend(ctx context.Context, filePath string) (fs.FileInfo, error) {
@@ -503,6 +613,9 @@ func (c *WorkspaceFilesClient) statFromBackend(ctx context.Context, filePath str
 			apiInfo.SignedURL = resp.WsfsObjectInfo.SignedURL.URL
 			apiInfo.SignedURLHeaders = resp.WsfsObjectInfo.SignedURL.Headers
 		}
+		if merged, changed := c.cachedExactNotebookInfo(filePath, apiInfo); changed {
+			apiInfo = merged
+		}
 		c.cache.Set(filePath, apiInfo)
 		return apiInfo, nil
 	})
@@ -514,13 +627,13 @@ func (c *WorkspaceFilesClient) statFromBackend(ctx context.Context, filePath str
 	if !ok {
 		return nil, fmt.Errorf("unexpected stat result type %T", value)
 	}
-	return c.completeNotebookSize(ctx, filePath, info)
+	return info, nil
 }
 
 func (c *WorkspaceFilesClient) statInternal(ctx context.Context, filePath string) (fs.FileInfo, error) {
 	directInfo, directFound := c.cache.Get(filePath)
 	if directFound && directInfo != nil {
-		return c.completeNotebookSize(ctx, filePath, directInfo)
+		return c.preserveNotebookExactSize(filePath, directInfo), nil
 	}
 
 	if info, found := c.cache.LookupDirEntry(filePath); found {
@@ -528,7 +641,7 @@ func (c *WorkspaceFilesClient) statInternal(ctx context.Context, filePath string
 			c.cache.Set(filePath, nil)
 			return nil, fs.ErrNotExist
 		}
-		return c.completeNotebookSize(ctx, filePath, info)
+		return c.preserveNotebookExactSize(filePath, info), nil
 	}
 
 	if directFound {
@@ -570,6 +683,9 @@ func (c *WorkspaceFilesClient) ReadDir(ctx context.Context, dirPath string) ([]f
 			if obj.SignedURL != nil {
 				info.SignedURL = obj.SignedURL.URL
 				info.SignedURLHeaders = obj.SignedURL.Headers
+			}
+			if merged, changed := c.cachedExactNotebookInfo(info.Path, info); changed {
+				info = merged
 			}
 
 			entry := WSDirEntry{info}
@@ -648,14 +764,6 @@ func (c *WorkspaceFilesClient) exportNotebookSource(ctx context.Context, filepat
 	return base64.StdEncoding.DecodeString(resp.Content)
 }
 
-func (c *WorkspaceFilesClient) notebookSize(ctx context.Context, filepath string) (int64, error) {
-	data, err := c.exportNotebookSource(ctx, filepath)
-	if err != nil {
-		return 0, err
-	}
-	return int64(len(data)), nil
-}
-
 func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]byte, error) {
 	value, err := c.flights.Do("read:"+filePath, func() (any, error) {
 		info, err := c.Stat(ctx, filePath)
@@ -676,7 +784,12 @@ func (c *WorkspaceFilesClient) ReadAll(ctx context.Context, filePath string) ([]
 		// For notebooks, use Export with SOURCE format.
 		if wsInfo.IsNotebook() {
 			logging.Debugf("Read notebook via Export (SOURCE format) for path: %s", actualPath)
-			return c.exportNotebookSource(ctx, actualPath)
+			data, err := c.exportNotebookSource(ctx, actualPath)
+			if err != nil {
+				return nil, err
+			}
+			c.rememberNotebookExactSize(filePath, wsInfo, int64(len(data)))
+			return data, nil
 		}
 
 		fileSize := wsInfo.Size()

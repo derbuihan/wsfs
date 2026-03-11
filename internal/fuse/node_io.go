@@ -16,6 +16,20 @@ import (
 	"wsfs/internal/logging"
 )
 
+func (n *WSNode) rememberNotebookExactSizeLocked(size int64) {
+	if !n.fileInfo.IsNotebook() {
+		return
+	}
+	if n.fileInfo.NotebookSizeComputed && n.fileInfo.Size() == size {
+		return
+	}
+	n.fileInfo.ObjectInfo.Size = size
+	n.fileInfo.NotebookSizeComputed = true
+	if n.wfClient != nil {
+		n.wfClient.CacheSet(n.Path(), n.fileInfo)
+	}
+}
+
 func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
 	// If dirty, data must already be in memory
 	if n.isDirtyLocked() {
@@ -44,10 +58,11 @@ func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
 		cachedPath, checksum, found := n.diskCache.Get(remotePath, remoteModTime)
 		if found {
 			// Verify cache file exists
-			if _, err := os.Stat(cachedPath); err == nil {
+			if info, err := os.Stat(cachedPath); err == nil {
 				n.buf.CachedPath = cachedPath
 				n.buf.CachedChecksum = checksum
-				n.buf.FileSize = n.fileInfo.Size()
+				n.buf.FileSize = info.Size()
+				n.rememberNotebookExactSizeLocked(info.Size())
 				logging.Debugf("Cache path set for %s (on-demand read)", remotePath)
 				return 0
 			}
@@ -74,6 +89,7 @@ func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
 			n.buf.CachedPath = localPath
 			n.buf.CachedChecksum = filecache.CalculateChecksum(data)
 			n.buf.FileSize = int64(len(data))
+			n.rememberNotebookExactSizeLocked(int64(len(data)))
 			logging.Debugf("Cached file %s (%d bytes), using on-demand read", remotePath, len(data))
 			return 0
 		}
@@ -84,6 +100,7 @@ func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
 	// Fallback: keep data in memory (when cache is disabled or failed)
 	n.buf.Data = data
 	n.buf.FileSize = int64(len(data))
+	n.rememberNotebookExactSizeLocked(int64(len(data)))
 	return 0
 }
 
@@ -115,6 +132,8 @@ func (n *WSNode) loadDataFromCacheLocked(ctx context.Context) syscall.Errno {
 	data, err := readCache()
 	if err == nil {
 		n.buf.Data = data
+		n.buf.FileSize = int64(len(data))
+		n.rememberNotebookExactSizeLocked(int64(len(data)))
 		return 0
 	}
 
@@ -137,6 +156,8 @@ func (n *WSNode) loadDataFromCacheLocked(ctx context.Context) syscall.Errno {
 		return syscall.EIO
 	}
 	n.buf.Data = data
+	n.buf.FileSize = int64(len(data))
+	n.rememberNotebookExactSizeLocked(int64(len(data)))
 	return 0
 }
 
@@ -264,6 +285,8 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 	if flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_TRUNC) != 0 {
 		openFlags |= fuse.FOPEN_DIRECT_IO
 	} else if metadataChanged {
+		openFlags |= fuse.FOPEN_DIRECT_IO
+	} else if n.fileInfo.IsNotebook() && !n.fileInfo.NotebookSizeComputed {
 		openFlags |= fuse.FOPEN_DIRECT_IO
 	} else {
 		openFlags |= fuse.FOPEN_KEEP_CACHE

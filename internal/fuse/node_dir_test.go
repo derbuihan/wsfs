@@ -3,6 +3,7 @@ package fuse
 import (
 	"context"
 	iofs "io/fs"
+	"path"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -16,6 +17,70 @@ import (
 	"wsfs/internal/databricks"
 	"wsfs/internal/filecache"
 )
+
+type dirFirstLookupAPI struct {
+	entries         map[string]databricks.WSFileInfo
+	warmedDirs      map[string]map[string]databricks.WSFileInfo
+	readDirCalls    int
+	backendStatHits int
+}
+
+func (a *dirFirstLookupAPI) Stat(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+	parent := path.Dir(filePath)
+	name := path.Base(filePath)
+	if warmed, ok := a.warmedDirs[parent]; ok {
+		if info, found := warmed[name]; found {
+			return info, nil
+		}
+		return nil, iofs.ErrNotExist
+	}
+
+	a.backendStatHits++
+	if info, ok := a.entries[filePath]; ok {
+		return info, nil
+	}
+	return nil, iofs.ErrNotExist
+}
+
+func (a *dirFirstLookupAPI) StatFresh(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+	return a.Stat(ctx, filePath)
+}
+
+func (a *dirFirstLookupAPI) ReadDir(ctx context.Context, dirPath string) ([]iofs.DirEntry, error) {
+	a.readDirCalls++
+	if a.warmedDirs == nil {
+		a.warmedDirs = make(map[string]map[string]databricks.WSFileInfo)
+	}
+
+	warmed := make(map[string]databricks.WSFileInfo)
+	entries := []iofs.DirEntry{}
+	for filePath, info := range a.entries {
+		if path.Dir(filePath) != dirPath {
+			continue
+		}
+		warmed[path.Base(filePath)] = info
+		entries = append(entries, databricks.WSDirEntry{WSFileInfo: info})
+	}
+	a.warmedDirs[dirPath] = warmed
+	return entries, nil
+}
+
+func (a *dirFirstLookupAPI) ReadAll(ctx context.Context, filePath string) ([]byte, error) {
+	return nil, nil
+}
+func (a *dirFirstLookupAPI) Write(ctx context.Context, filepath string, data []byte) error {
+	return nil
+}
+func (a *dirFirstLookupAPI) Delete(ctx context.Context, filePath string, recursive bool) error {
+	return nil
+}
+func (a *dirFirstLookupAPI) Mkdir(ctx context.Context, dirPath string) error { return nil }
+func (a *dirFirstLookupAPI) Rename(ctx context.Context, sourcePath string, destinationPath string) error {
+	return nil
+}
+func (a *dirFirstLookupAPI) CacheSet(path string, info iofs.FileInfo) {}
+func (a *dirFirstLookupAPI) CacheInvalidate(filePath string)          {}
+func (a *dirFirstLookupAPI) MetadataTTL() time.Duration               { return time.Second }
 
 func newTestRootNode(t *testing.T, api databricks.WorkspaceFilesAPI) *WSNode {
 	t.Helper()
@@ -171,6 +236,30 @@ func TestWSNodeLookupSuccess(t *testing.T) {
 	}
 	if child.ownerUid != root.ownerUid || child.ownerGid != root.ownerGid || child.restrictAccess != root.restrictAccess {
 		t.Fatal("child did not inherit access config")
+	}
+}
+
+func TestWSNodeLookupWarmsParentReadDirBeforeStat(t *testing.T) {
+	api := &dirFirstLookupAPI{
+		entries: map[string]databricks.WSFileInfo{
+			"/file1.txt": databricks.NewTestFileInfo("/file1.txt", 12, false),
+			"/subdir":    databricks.NewTestFileInfo("/subdir", 0, true),
+		},
+	}
+	root := newTestRootNode(t, api)
+
+	if inode, errno := root.Lookup(context.Background(), "file1.txt", &fuse.EntryOut{}); errno != 0 || inode == nil {
+		t.Fatalf("Lookup existing failed: errno=%d inode=%v", errno, inode)
+	}
+	if inode, errno := root.Lookup(context.Background(), "missing.txt", &fuse.EntryOut{}); errno != syscall.ENOENT || inode != nil {
+		t.Fatalf("Lookup missing = (%v, %d), want (nil, ENOENT)", inode, errno)
+	}
+
+	if api.readDirCalls != 2 {
+		t.Fatalf("expected 2 ReadDir warmups, got %d", api.readDirCalls)
+	}
+	if api.backendStatHits != 0 {
+		t.Fatalf("expected 0 backend stat hits after ReadDir warmup, got %d", api.backendStatHits)
 	}
 }
 

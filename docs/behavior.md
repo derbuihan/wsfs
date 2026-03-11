@@ -47,6 +47,7 @@ Important details:
 
 - Clean read-only `Open` reuses cached metadata while the metadata TTL is still fresh (`10s` by default).
 - Once the metadata TTL expires, the next `Lookup` / `Getattr` / read-only `Open` rechecks remote metadata.
+- Notebook source files do not export during metadata-only paths such as `stat(2)` / `lookup`; wsfs learns the exact exported source size when notebook content is read and keeps reusing it while the notebook identity stays unchanged.
 - If that metadata changed, wsfs:
   - drops any clean in-memory buffer
   - invalidates related disk-cache entries
@@ -61,6 +62,12 @@ This behavior is designed to keep search/indexing throughput reasonable for VSCo
 - Prefer mounting a narrow subtree with `--remote-path` instead of opening the whole workspace root in your editor.
 - Exclude dependency, build, and cache directories in editor settings (`.git`, `node_modules`, `.venv`, `dist`, `build`, `target`, `__pycache__`, `.pytest_cache`).
 - Expect out-of-band remote overwrites to become visible after the metadata TTL boundary rather than on every read-only reopen.
+
+## Git-heavy workloads
+
+- Prefer a local separate git dir so `.git` lives on a local filesystem while the working tree remains on wsfs.
+- `scripts/tests/git_diagnostic.sh` is the quick way to compare cold/warm metadata timings on a mounted repo.
+- Git's `untracked-cache` and `fsmonitor` can help as temporary mitigations, but they do not replace wsfs-side metadata optimizations.
 
 ## Notebook source view
 

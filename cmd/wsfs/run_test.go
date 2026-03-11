@@ -153,7 +153,7 @@ func TestVersionString(t *testing.T) {
 
 func TestBuildNodeConfig(t *testing.T) {
 	cfg := buildNodeConfig(42, 24, true)
-	if cfg.OwnerUid != 42 || cfg.OwnerGid != 24 || cfg.RestrictAccess {
+	if cfg.OwnerUid != 42 || cfg.OwnerGid != 24 || cfg.RestrictAccess || cfg.AttrTTL != defaultAttrTTL || cfg.EntryTTL != defaultEntryTTL {
 		t.Fatalf("unexpected node config: %+v", cfg)
 	}
 }
@@ -168,6 +168,15 @@ func TestBuildMountOptions(t *testing.T) {
 	}
 	if opts.MountOptions.Name != "wsfs" || opts.MountOptions.FsName != "wsfs" {
 		t.Fatalf("unexpected mount options: %+v", opts.MountOptions)
+	}
+	if opts.AttrTimeout == nil || *opts.AttrTimeout != defaultAttrTTL {
+		t.Fatalf("unexpected attr timeout: %v", opts.AttrTimeout)
+	}
+	if opts.EntryTimeout == nil || *opts.EntryTimeout != defaultEntryTTL {
+		t.Fatalf("unexpected entry timeout: %v", opts.EntryTimeout)
+	}
+	if opts.NegativeTimeout == nil || *opts.NegativeTimeout != defaultNegativeTTL {
+		t.Fatalf("unexpected negative timeout: %v", opts.NegativeTimeout)
 	}
 }
 

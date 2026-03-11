@@ -673,6 +673,48 @@ func TestReadDirCachesEntriesForStatAndNegativeLookup(t *testing.T) {
 	}
 }
 
+func TestNewWorkspaceFilesClientWithDepsAndConfigUsesTTLs(t *testing.T) {
+	objectInfoCalls := 0
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if !strings.Contains(path, "object-info") {
+				return fmt.Errorf("unexpected path: %s", path)
+			}
+			objectInfoCalls++
+			return fs.ErrNotExist
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDepsAndConfig(&MockWorkspaceClient{}, mockAPI, nil, CacheConfig{
+		MetadataTTL: 4 * time.Second,
+		NegativeTTL: 20 * time.Millisecond,
+	})
+
+	if got := client.MetadataTTL(); got != 4*time.Second {
+		t.Fatalf("MetadataTTL() = %v, want 4s", got)
+	}
+
+	if _, err := client.Stat(context.Background(), "/missing.txt"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("expected ErrNotExist, got %v", err)
+	}
+	if _, err := client.Stat(context.Background(), "/missing.txt"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("expected ErrNotExist, got %v", err)
+	}
+	if objectInfoCalls != 1 {
+		t.Fatalf("expected one cached negative lookup, got %d calls", objectInfoCalls)
+	}
+
+	time.Sleep(30 * time.Millisecond)
+	if _, err := client.Stat(context.Background(), "/missing.txt"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("expected ErrNotExist after negative TTL expiry, got %v", err)
+	}
+	if objectInfoCalls != 2 {
+		t.Fatalf("expected negative TTL expiry to trigger second backend call, got %d", objectInfoCalls)
+	}
+}
+
 func TestReadDirSingleflight(t *testing.T) {
 	var (
 		mu        sync.Mutex
@@ -1400,8 +1442,6 @@ func TestIsNotebook(t *testing.T) {
 func TestStatNotebookSourceAlias(t *testing.T) {
 	notebookContent := "# Databricks notebook source\nprint('hello')\n"
 	exportCalled := false
-	exportPath := ""
-	exportFormat := workspace.ExportFormatAuto
 
 	mockAPI := &MockAPIClient{
 		DoFunc: func(ctx context.Context, method, path string,
@@ -1430,8 +1470,6 @@ func TestStatNotebookSourceAlias(t *testing.T) {
 	mockWorkspace := &MockWorkspaceClient{
 		ExportFunc: func(ctx context.Context, req workspace.ExportRequest) (*workspace.ExportResponse, error) {
 			exportCalled = true
-			exportPath = req.Path
-			exportFormat = req.Format
 			return &workspace.ExportResponse{
 				Content: base64.StdEncoding.EncodeToString([]byte(notebookContent)),
 			}, nil
@@ -1454,24 +1492,18 @@ func TestStatNotebookSourceAlias(t *testing.T) {
 	if wsInfo.Language != workspace.LanguagePython {
 		t.Fatalf("unexpected language: %s", wsInfo.Language)
 	}
-	if wsInfo.Size() != int64(len(notebookContent)) {
-		t.Fatalf("expected size %d, got %d", len(notebookContent), wsInfo.Size())
+	if wsInfo.Size() != 1 {
+		t.Fatalf("expected backend metadata size 1, got %d", wsInfo.Size())
 	}
-	if !wsInfo.NotebookSizeComputed {
-		t.Fatal("expected computed notebook size")
+	if wsInfo.NotebookSizeComputed {
+		t.Fatal("did not expect notebook size to be computed during Stat")
 	}
-	if !exportCalled {
-		t.Fatal("expected notebook export for size computation")
-	}
-	if exportFormat != workspace.ExportFormatSource {
-		t.Fatalf("expected SOURCE export, got %v", exportFormat)
-	}
-	if exportPath != "/test/notebook" {
-		t.Fatalf("unexpected export path: %s", exportPath)
+	if exportCalled {
+		t.Fatal("did not expect notebook export during Stat")
 	}
 }
 
-func TestStatNotebookSizeUsesExportWhenCached(t *testing.T) {
+func TestStatNotebookSizeDoesNotExportWhenCached(t *testing.T) {
 	notebookContent := "# Databricks notebook source\nprint('cached')\n"
 	exportCalled := false
 	apiCalled := false
@@ -1518,14 +1550,14 @@ func TestStatNotebookSizeUsesExportWhenCached(t *testing.T) {
 		t.Fatalf("Stat failed: %v", err)
 	}
 	wsInfo := info.(WSFileInfo)
-	if wsInfo.Size() != int64(len(notebookContent)) {
-		t.Errorf("Expected notebook size %d, got %d", len(notebookContent), wsInfo.Size())
+	if wsInfo.Size() != 1 {
+		t.Errorf("Expected backend metadata size 1, got %d", wsInfo.Size())
 	}
-	if !wsInfo.NotebookSizeComputed {
-		t.Error("Expected notebook size to be computed")
+	if wsInfo.NotebookSizeComputed {
+		t.Error("Did not expect notebook size to be computed")
 	}
-	if !exportCalled {
-		t.Error("Expected Export to be called for cached notebook size")
+	if exportCalled {
+		t.Error("Did not expect Export to be called for cached notebook size")
 	}
 	if apiCalled {
 		t.Error("Did not expect object-info API call for cached notebook")
@@ -1539,11 +1571,11 @@ func TestStatNotebookSizeUsesExportWhenCached(t *testing.T) {
 	if !ok {
 		t.Fatalf("Expected WSFileInfo in cache, got %T", cached)
 	}
-	if cachedInfo.Size() != int64(len(notebookContent)) {
-		t.Errorf("Expected cached size %d, got %d", len(notebookContent), cachedInfo.Size())
+	if cachedInfo.Size() != 1 {
+		t.Errorf("Expected cached size 1, got %d", cachedInfo.Size())
 	}
-	if !cachedInfo.NotebookSizeComputed {
-		t.Error("Expected cached notebook size to be computed")
+	if cachedInfo.NotebookSizeComputed {
+		t.Error("Did not expect cached notebook size to be computed")
 	}
 }
 
@@ -1684,6 +1716,90 @@ func TestReadAllNotebook(t *testing.T) {
 	}
 	if string(data) != notebookContent {
 		t.Errorf("Expected %q, got %q", notebookContent, string(data))
+	}
+
+	info, err := client.Stat(context.Background(), "/test/notebook.py")
+	if err != nil {
+		t.Fatalf("Stat after ReadAll failed: %v", err)
+	}
+	wsInfo := info.(WSFileInfo)
+	if wsInfo.Size() != int64(len(notebookContent)) {
+		t.Fatalf("expected learned size %d, got %d", len(notebookContent), wsInfo.Size())
+	}
+	if !wsInfo.NotebookSizeComputed {
+		t.Fatal("expected learned exact notebook size after ReadAll")
+	}
+
+	cached, found := client.cache.Get("/test/notebook.py")
+	if !found {
+		t.Fatal("expected direct cache entry for notebook alias")
+	}
+	cachedInfo := cached.(WSFileInfo)
+	if cachedInfo.Size() != int64(len(notebookContent)) || !cachedInfo.NotebookSizeComputed {
+		t.Fatalf("expected cached exact size after ReadAll, got size=%d exact=%v", cachedInfo.Size(), cachedInfo.NotebookSizeComputed)
+	}
+}
+
+func TestStatFreshPreservesExactNotebookSize(t *testing.T) {
+	notebookContent := "# Databricks notebook source\nprint('fresh')\n"
+	modifiedAt := time.Now().UnixMilli()
+	exportCalls := 0
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fnotebook.py") {
+				return fs.ErrNotExist
+			}
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fnotebook") {
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/notebook",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						Size:       1,
+						ModifiedAt: modifiedAt,
+					},
+				}
+				return nil
+			}
+			return fmt.Errorf("unexpected path: %s", path)
+		},
+	}
+
+	mockWorkspace := &MockWorkspaceClient{
+		ExportFunc: func(ctx context.Context, req workspace.ExportRequest) (*workspace.ExportResponse, error) {
+			exportCalls++
+			return &workspace.ExportResponse{
+				Content: base64.StdEncoding.EncodeToString([]byte(notebookContent)),
+			}, nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, nil)
+
+	if _, err := client.ReadAll(context.Background(), "/test/notebook.py"); err != nil {
+		t.Fatalf("ReadAll failed: %v", err)
+	}
+	if exportCalls != 1 {
+		t.Fatalf("expected one export during ReadAll, got %d", exportCalls)
+	}
+
+	info, err := client.StatFresh(context.Background(), "/test/notebook")
+	if err != nil {
+		t.Fatalf("StatFresh failed: %v", err)
+	}
+	wsInfo := info.(WSFileInfo)
+	if wsInfo.Size() != int64(len(notebookContent)) {
+		t.Fatalf("expected preserved exact size %d, got %d", len(notebookContent), wsInfo.Size())
+	}
+	if !wsInfo.NotebookSizeComputed {
+		t.Fatal("expected exact notebook size to stay computed after StatFresh")
+	}
+	if exportCalls != 1 {
+		t.Fatalf("did not expect StatFresh to export notebook again, got %d total exports", exportCalls)
 	}
 }
 

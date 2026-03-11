@@ -1459,6 +1459,100 @@ func TestOpenReadOnlyDefersRemoteRead(t *testing.T) {
 	}
 }
 
+func TestOpenReadOnlyNotebookWithoutExactSizeUsesDirectIOAndLearnsSize(t *testing.T) {
+	notebookContent := []byte("# Databricks notebook source\nprint('hello')\n")
+	modTime := time.Now()
+	readAllCalls := 0
+
+	api := &databricks.FakeWorkspaceAPI{
+		ReadAllFunc: func(ctx context.Context, filePath string) ([]byte, error) {
+			readAllCalls++
+			return notebookContent, nil
+		},
+	}
+
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeNotebook,
+			Path:       "/test/notebook",
+			Language:   workspace.LanguagePython,
+			Size:       1,
+			ModifiedAt: modTime.UnixMilli(),
+		}},
+		metadataCheckedAt: time.Now(),
+	}
+
+	if _, openFlags, errno := n.Open(context.Background(), 0); errno != 0 {
+		t.Fatalf("Open failed: %d", errno)
+	} else {
+		if openFlags&fuse.FOPEN_DIRECT_IO == 0 {
+			t.Fatalf("expected DIRECT_IO for notebook without exact size, got flags=%d", openFlags)
+		}
+		if openFlags&fuse.FOPEN_KEEP_CACHE != 0 {
+			t.Fatalf("did not expect KEEP_CACHE for notebook without exact size, got flags=%d", openFlags)
+		}
+	}
+
+	result, errno := n.Read(context.Background(), nil, make([]byte, len(notebookContent)+8), 0)
+	if errno != 0 {
+		t.Fatalf("Read failed: %d", errno)
+	}
+	data, _ := result.Bytes(nil)
+	if string(data) != string(notebookContent) {
+		t.Fatalf("unexpected notebook data: %q", string(data))
+	}
+	if readAllCalls != 1 {
+		t.Fatalf("expected one notebook read, got %d", readAllCalls)
+	}
+	if n.fileInfo.Size() != int64(len(notebookContent)) {
+		t.Fatalf("expected learned notebook size %d, got %d", len(notebookContent), n.fileInfo.Size())
+	}
+	if !n.fileInfo.NotebookSizeComputed {
+		t.Fatal("expected notebook exact size to be learned after Read")
+	}
+}
+
+func TestEnsureDataLockedUsesCachedNotebookFileSize(t *testing.T) {
+	notebookContent := []byte("# Databricks notebook source\nprint('cached')\n")
+	modTime := time.Now()
+	diskCache, err := filecache.NewDiskCache(t.TempDir(), 0, time.Hour)
+	if err != nil {
+		t.Fatalf("NewDiskCache failed: %v", err)
+	}
+	if _, err := diskCache.Set("/test/notebook", notebookContent, modTime); err != nil {
+		t.Fatalf("cache Set failed: %v", err)
+	}
+
+	n := &WSNode{
+		wfClient:  &databricks.FakeWorkspaceAPI{},
+		diskCache: diskCache,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeNotebook,
+			Path:       "/test/notebook",
+			Language:   workspace.LanguagePython,
+			Size:       1,
+			ModifiedAt: modTime.UnixMilli(),
+		}},
+	}
+
+	if errno := n.ensureDataLocked(context.Background()); errno != 0 {
+		t.Fatalf("ensureDataLocked failed: %d", errno)
+	}
+	if n.buf.CachedPath == "" {
+		t.Fatal("expected cache path to be reused")
+	}
+	if n.buf.FileSize != int64(len(notebookContent)) {
+		t.Fatalf("expected cache file size %d, got %d", len(notebookContent), n.buf.FileSize)
+	}
+	if n.fileInfo.Size() != int64(len(notebookContent)) {
+		t.Fatalf("expected learned notebook size %d, got %d", len(notebookContent), n.fileInfo.Size())
+	}
+	if !n.fileInfo.NotebookSizeComputed {
+		t.Fatal("expected cache-backed notebook size to be marked exact")
+	}
+}
+
 func TestReadFallsBackToRemoteWhenCacheFileMissing(t *testing.T) {
 	api := &databricks.FakeWorkspaceAPI{
 		ReadAllFunc: func(ctx context.Context, filePath string) ([]byte, error) {

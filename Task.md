@@ -67,6 +67,11 @@
 - [x] Databricks hidden `projects` API を追加深掘り（`status` / `diff` / `add` / `commit` 系 REST の不在と private GraphQL 境界を確認）
 - [x] Databricks hidden `/api/2.0/git` family を追加調査（`git` / `repo-git` / `project-git` / `git-ops` 系は `ENDPOINT_NOT_FOUND` を確認）
 
+## 完了（2026-03-11）
+
+- [x] VSCode E2E ワークスペース cleanup を追加（`scripts/tests/vscode/run_in_container.sh` で成功/失敗時ともに `vscode_e2e_*` を削除）
+- [x] Git metadata path を高速化（notebook size export を metadata path から除去、dir-first Lookup、zero-config TTL defaults、`git_diagnostic.sh`、docs/test 更新）
+
 ---
 
 ## 未対応（オプション）

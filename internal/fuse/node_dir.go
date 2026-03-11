@@ -156,6 +156,7 @@ func synthesizedCreatedFileInfo(childPath string, initialContent []byte) databri
 		info.ObjectInfo.Path = actualPath
 		info.ObjectInfo.ObjectType = workspace.ObjectTypeNotebook
 		info.ObjectInfo.Language = language
+		info.NotebookSizeComputed = true
 	}
 	return info
 }
@@ -250,14 +251,19 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 					out.Attr.Blocks = (out.Attr.Size + blockFactor - 1) / blockFactor
 				}
 				existingNode.mu.Unlock()
-				out.SetEntryTimeout(entryTimeoutSec)
-				out.SetAttrTimeout(attrTimeoutSec)
+				n.setEntryOutTimeouts(out)
 				logging.Debugf("Lookup: returning existing cached node for %s", childPath)
 				return existingChild, 0
 			}
 			existingNode.mu.Unlock()
 		}
 	}
+
+	listCtx, listCancel := context.WithTimeout(ctx, dirListTimeout)
+	if _, err := n.wfClient.ReadDir(listCtx, n.Path()); err != nil {
+		logging.Debugf("Lookup: parent ReadDir warmup failed for %s: %v", n.Path(), err)
+	}
+	listCancel()
 
 	opCtx, cancel := context.WithTimeout(ctx, metadataOpTimeout)
 	defer cancel()
@@ -272,20 +278,10 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 		return nil, syscall.EIO
 	}
 
-	childNode := &WSNode{
-		wfClient:          n.wfClient,
-		diskCache:         n.diskCache,
-		fileInfo:          wsInfo,
-		registry:          n.registry,
-		ownerUid:          n.ownerUid,
-		ownerGid:          n.ownerGid,
-		restrictAccess:    n.restrictAccess,
-		metadataCheckedAt: time.Now(),
-	}
+	childNode := n.newChildNode(wsInfo)
 	childNode.fillAttr(ctx, &out.Attr)
 
-	out.SetEntryTimeout(entryTimeoutSec)
-	out.SetAttrTimeout(attrTimeoutSec)
+	n.setEntryOutTimeouts(out)
 
 	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode), Ino: stableIno(wsInfo)})
 	return child, 0
@@ -351,23 +347,13 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 		wsInfo = synthesizedCreatedFileInfo(childPath, initialContent)
 		ok = true
 	}
-	childNode := &WSNode{
-		wfClient:                  n.wfClient,
-		diskCache:                 n.diskCache,
-		fileInfo:                  wsInfo,
-		buf:                       fileBuffer{Data: initialContent, ReplaceOnFirstWrite: len(initialContent) > 0},
-		registry:                  n.registry,
-		ownerUid:                  n.ownerUid,
-		ownerGid:                  n.ownerGid,
-		restrictAccess:            n.restrictAccess,
-		allowPostCreateTimestamps: true,
-		metadataCheckedAt:         time.Now(),
-	}
+	childNode := n.newChildNode(wsInfo)
+	childNode.buf = fileBuffer{Data: initialContent, ReplaceOnFirstWrite: len(initialContent) > 0}
+	childNode.allowPostCreateTimestamps = true
 	childNode.incrementOpenLocked()
 	childNode.fillAttr(ctx, &out.Attr)
 
-	out.SetEntryTimeout(entryTimeoutSec)
-	out.SetAttrTimeout(attrTimeoutSec)
+	n.setEntryOutTimeouts(out)
 
 	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode), Ino: stableIno(wsInfo)})
 	return child, &wsFileHandle{}, fuse.FOPEN_KEEP_CACHE, 0
@@ -442,17 +428,9 @@ func (n *WSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 		logging.Debugf("Mkdir: unexpected file info type for %s", childPath)
 		return nil, syscall.EIO
 	}
-	childNode := &WSNode{
-		wfClient:          n.wfClient,
-		diskCache:         n.diskCache,
-		fileInfo:          wsInfo,
-		registry:          n.registry,
-		ownerUid:          n.ownerUid,
-		ownerGid:          n.ownerGid,
-		restrictAccess:    n.restrictAccess,
-		metadataCheckedAt: time.Now(),
-	}
+	childNode := n.newChildNode(wsInfo)
 	childNode.fillAttr(ctx, &out.Attr)
+	n.setEntryOutTimeouts(out)
 
 	child := n.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: uint32(out.Mode), Ino: stableIno(wsInfo)})
 	return child, 0

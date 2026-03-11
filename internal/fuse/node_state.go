@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
+	"github.com/hanwen/go-fuse/v2/fuse"
 
 	"wsfs/internal/databricks"
 	"wsfs/internal/filecache"
@@ -17,9 +18,8 @@ import (
 
 // File system constants
 const (
-	// Attribute and entry cache timeouts in seconds
-	attrTimeoutSec  = 10
-	entryTimeoutSec = 10
+	defaultAttrTTL  = 10 * time.Second
+	defaultEntryTTL = 10 * time.Second
 
 	// File permissions
 	dirMode  = 0755
@@ -72,6 +72,8 @@ type NodeConfig struct {
 	OwnerUid       uint32 // UID of the user who mounted the filesystem
 	OwnerGid       uint32 // GID of the user who mounted the filesystem
 	RestrictAccess bool   // Whether to enforce UID-based access control
+	AttrTTL        time.Duration
+	EntryTTL       time.Duration
 }
 
 type dirtyFlag uint8
@@ -92,6 +94,8 @@ type WSNode struct {
 	ownerUid                  uint32 // UID of the mount owner
 	ownerGid                  uint32 // GID of the mount owner
 	restrictAccess            bool   // Enforce access control when true
+	attrTTL                   time.Duration
+	entryTTL                  time.Duration
 	openCount                 int
 	dirtyFlags                dirtyFlag
 	pendingTruncate           bool
@@ -122,6 +126,51 @@ var _ = (fs.NodeOnForgetter)((*WSNode)(nil))
 
 func (n *WSNode) Path() string {
 	return n.fileInfo.Path
+}
+
+func (n *WSNode) attrTimeout() time.Duration {
+	if n.attrTTL <= 0 {
+		return defaultAttrTTL
+	}
+	return n.attrTTL
+}
+
+func (n *WSNode) entryTimeout() time.Duration {
+	if n.entryTTL <= 0 {
+		return defaultEntryTTL
+	}
+	return n.entryTTL
+}
+
+func (n *WSNode) setEntryOutTimeouts(out *fuse.EntryOut) {
+	out.SetEntryTimeout(n.entryTimeout())
+	out.SetAttrTimeout(n.attrTimeout())
+}
+
+func (n *WSNode) applyNodeConfig(config *NodeConfig) {
+	if config == nil {
+		return
+	}
+	n.ownerUid = config.OwnerUid
+	n.ownerGid = config.OwnerGid
+	n.restrictAccess = config.RestrictAccess
+	n.attrTTL = config.AttrTTL
+	n.entryTTL = config.EntryTTL
+}
+
+func (n *WSNode) newChildNode(wsInfo databricks.WSFileInfo) *WSNode {
+	return &WSNode{
+		wfClient:          n.wfClient,
+		diskCache:         n.diskCache,
+		fileInfo:          wsInfo,
+		registry:          n.registry,
+		ownerUid:          n.ownerUid,
+		ownerGid:          n.ownerGid,
+		restrictAccess:    n.restrictAccess,
+		attrTTL:           n.attrTTL,
+		entryTTL:          n.entryTTL,
+		metadataCheckedAt: time.Now(),
+	}
 }
 
 func stableIno(info databricks.WSFileInfo) uint64 {
@@ -262,12 +311,7 @@ func NewRootNode(wfClient databricks.WorkspaceFilesAPI, diskCache *filecache.Dis
 		metadataCheckedAt: time.Now(),
 	}
 
-	// Apply access control configuration
-	if config != nil {
-		node.ownerUid = config.OwnerUid
-		node.ownerGid = config.OwnerGid
-		node.restrictAccess = config.RestrictAccess
-	}
+	node.applyNodeConfig(config)
 
 	return node, nil
 }

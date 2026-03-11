@@ -161,12 +161,13 @@ wsfs always uses two cache layers:
 - A metadata cache for directory listings, lookups, and short-lived negative entries
 - A disk-backed content cache for file reads
 
-There are no cache tuning flags. The goal is that `./scripts/run_wsfs_docker.sh` is enough for normal development use.
+The cache is always on. wsfs keeps the metadata and FUSE TTL behavior zero-config; the built-in defaults are tuned for normal editor and shell workloads.
 
 ### Cache Behavior
 
 - Directory metadata is reused for short TTL windows so shells and editors do not re-fetch the same listings on every lookup.
 - Clean regular files reuse metadata and kernel cache within the metadata TTL window (`10s` by default). Once the TTL expires, the next `Lookup`/`Getattr`/read-only `Open` rechecks remote metadata.
+- Notebook source files use backend metadata on `stat`/`lookup`; exact exported source size is learned when content is read, then reused while the notebook identity (`modified_at`, object/resource ID, path) stays the same.
 - If that metadata changed, wsfs drops the clean buffer, invalidates related metadata/content cache state, and avoids stale kernel page-cache reuse for that open.
 - File contents are cached on disk after the first read and reused until the entry is invalidated or evicted.
 - Missing or corrupt disk cache files are invalidated and retried from Databricks once instead of immediately surfacing `EIO`.
@@ -215,6 +216,19 @@ Recommended `.vscode/settings.json` for wsfs-backed workspaces:
 }
 ```
 
+### Git-Heavy Workloads
+
+- Prefer a local separate git dir so the worktree stays on wsfs but `.git` lives on a local filesystem.
+- A plain Git command is enough:
+
+```bash
+git -C /mnt/wsfs/path/to/repo init --separate-git-dir ~/.local/state/wsfs/gitdirs/my-repo.git
+```
+
+- The same command works for an already-initialized repository and rewrites `.git` into a gitfile that points at the local git dir.
+- Use `scripts/tests/git_diagnostic.sh` to measure cold/warm `git status`, post-TTL `git status`, `git rev-parse`, and `git log` against a mounted repo.
+- As stopgaps, Git's `untracked-cache` and `fsmonitor` can help `status`-style commands, but the biggest wins come from wsfs metadata-path tuning or a local git dir.
+
 ### Cache Monitoring
 
 When running with `--debug`, cache activity is logged inside the Docker shell session:
@@ -261,6 +275,7 @@ go test ./...
 | **Stress tests** | `scripts/tests/stress_test.sh` | Concurrent access, rapid truncate, rename |
 | **Security / allow-other** | `scripts/tests/security_test.sh` | Validates `--allow-other` exposure semantics with a second local user |
 | **`rg` diagnostic** | `scripts/tests/rg_diagnostic.sh` | Prints cold/warm ripgrep timings and recent debug-log excerpts for mounted search workloads |
+| **`git` diagnostic** | `scripts/tests/git_diagnostic.sh` | Prints cold/warm Git metadata timings and recent debug-log excerpts for mounted repos |
 | **Docker shell** | `scripts/run_wsfs_docker.sh` | Common Docker wrapper that builds, mounts, and runs a shell or command |
 | **Docker integration wrapper** | `scripts/test_docker.sh` | Runs the standard integration suites, including a separate `--allow-other` security stage |
 | **VSCode core dev loop** | `scripts/test_vscode_docker.sh` | Runs the VSCode E2E project in `scripts/tests/vscode/` |
@@ -276,6 +291,12 @@ go test ./...
 
 # Print cold/warm ripgrep diagnostics against a mounted tree
 ./scripts/tests/rg_diagnostic.sh /mnt/wsfs /tmp/wsfs.log
+
+# Print cold/warm Git diagnostics against a mounted tree
+./scripts/tests/git_diagnostic.sh /mnt/wsfs /tmp/wsfs.log
+
+# Move Git metadata outside a mounted worktree
+git -C /mnt/wsfs/path/to/repo init --separate-git-dir ~/.local/state/wsfs/gitdirs/my-repo.git
 
 # Run specific Docker-backed test suites
 ./scripts/test_docker.sh --fuse-only
