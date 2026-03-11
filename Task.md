@@ -71,6 +71,8 @@
 
 - [x] VSCode E2E ワークスペース cleanup を追加（`scripts/tests/vscode/run_in_container.sh` で成功/失敗時ともに `vscode_e2e_*` を削除）
 - [x] Git metadata path を高速化（notebook size export を metadata path から除去、dir-first Lookup、zero-config TTL defaults、`git_diagnostic.sh`、docs/test 更新）
+- [x] Git smoke を標準 FUSE テストへ統合（`fuse_test.sh` に `git status/add/commit/rev-parse/log` を追加し、`git_diagnostic.sh` は手動診断に整理）
+- [x] Git 安定化 1-4（notebook exact size の永続化、flush 後 exact size 保持、new regular file first-write fast path、regular flush の local metadata 化、Git 回帰テスト追加）
 
 ---
 

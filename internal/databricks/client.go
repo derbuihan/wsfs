@@ -13,6 +13,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/databricks/databricks-sdk-go"
@@ -240,6 +241,8 @@ type WorkspaceFilesClient struct {
 	apiClient       apiDoer
 	cache           *metacache.Cache
 	flights         singleflightGroup
+	exactMu         sync.RWMutex
+	exactNotebooks  map[string]WSFileInfo
 }
 
 func NewWorkspaceFilesClient(w *databricks.WorkspaceClient) (*WorkspaceFilesClient, error) {
@@ -268,6 +271,7 @@ func NewWorkspaceFilesClientWithDepsAndConfig(workspaceClient workspaceClient, a
 		workspaceClient: workspaceClient,
 		apiClient:       apiClient,
 		cache:           c,
+		exactNotebooks:  make(map[string]WSFileInfo),
 	}
 }
 
@@ -380,10 +384,8 @@ func (c *WorkspaceFilesClient) statNotebookByFallbackAlias(ctx context.Context, 
 
 func (c *WorkspaceFilesClient) statFreshInternal(ctx context.Context, filePath string) (fs.FileInfo, error) {
 	var previousExact WSFileInfo
-	if cached, found := c.cache.Get(filePath); found && cached != nil {
-		if cachedInfo, ok := toWSFileInfo(cached); ok && cachedInfo.NotebookSizeComputed {
-			previousExact = cachedInfo
-		}
+	if cachedInfo, ok := c.exactNotebookInfoForKey(filePath); ok {
+		previousExact = cachedInfo
 	}
 	c.cache.Invalidate(filePath)
 	info, err := c.statFromBackend(ctx, filePath)
@@ -399,6 +401,7 @@ func (c *WorkspaceFilesClient) statFreshInternal(ctx context.Context, filePath s
 	merged, changed := mergeNotebookExactSize(wsInfo, previousExact)
 	if changed {
 		c.cache.Set(filePath, merged)
+		c.setExactNotebookInfo(merged, notebookExactInfoKeys(filePath, merged)...)
 	}
 	return merged, nil
 }
@@ -532,27 +535,141 @@ func mergeNotebookExactSize(info WSFileInfo, exact WSFileInfo) (WSFileInfo, bool
 	return info, true
 }
 
-func (c *WorkspaceFilesClient) cachedExactNotebookInfo(cacheKey string, info WSFileInfo) (WSFileInfo, bool) {
-	candidates := []string{}
-	if info.Path != "" {
-		candidates = append(candidates, info.Path)
-	}
-	if cacheKey != "" && cacheKey != info.Path {
-		candidates = append(candidates, cacheKey)
+func notebookInfoKeys(cacheKey string, info WSFileInfo) []string {
+	keys := make([]string, 0, 3)
+	seen := make(map[string]struct{}, 3)
+	add := func(key string) {
+		if key == "" {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
 	}
 
-	for _, key := range candidates {
-		cached, found := c.cache.Get(key)
-		if !found || cached == nil {
+	add(info.Path)
+	add(cacheKey)
+	if info.IsNotebook() && info.Path != "" {
+		add(pathutil.NotebookVisiblePath(info.Path, info.Language))
+	}
+
+	return keys
+}
+
+func notebookExactInfoKeys(cacheKey string, info WSFileInfo) []string {
+	if !info.IsNotebook() || !info.NotebookSizeComputed {
+		return nil
+	}
+	return notebookInfoKeys(cacheKey, info)
+}
+
+func notebookInvalidateTargets(filePath string) map[string]struct{} {
+	targets := map[string]struct{}{
+		filePath: {},
+	}
+	if actualPath, _, ok := pathutil.NotebookRemotePathFromSourcePath(filePath); ok {
+		targets[actualPath] = struct{}{}
+	}
+	if actualPath, ok := pathutil.NotebookRemotePathFromFallbackPath(filePath); ok {
+		targets[actualPath] = struct{}{}
+	}
+	return targets
+}
+
+func pathMatchesInvalidation(candidate string, target string) bool {
+	if target == "/" {
+		return strings.HasPrefix(candidate, "/")
+	}
+	if candidate == target {
+		return true
+	}
+	return strings.HasPrefix(candidate, strings.TrimSuffix(target, "/")+"/")
+}
+
+func (c *WorkspaceFilesClient) setExactNotebookInfo(info WSFileInfo, keys ...string) {
+	if !info.IsNotebook() || !info.NotebookSizeComputed {
+		return
+	}
+
+	c.exactMu.Lock()
+	defer c.exactMu.Unlock()
+	for _, key := range keys {
+		if key == "" {
 			continue
 		}
-		cachedInfo, ok := toWSFileInfo(cached)
-		if !ok || !cachedInfo.NotebookSizeComputed {
+		c.exactNotebooks[key] = info
+	}
+}
+
+func (c *WorkspaceFilesClient) exactNotebookInfoForKey(key string) (WSFileInfo, bool) {
+	if key == "" {
+		return WSFileInfo{}, false
+	}
+
+	c.exactMu.RLock()
+	info, ok := c.exactNotebooks[key]
+	c.exactMu.RUnlock()
+	if ok {
+		return info, true
+	}
+
+	cached, found := c.cache.Get(key)
+	if !found || cached == nil {
+		return WSFileInfo{}, false
+	}
+	cachedInfo, ok := toWSFileInfo(cached)
+	if !ok || !cachedInfo.IsNotebook() || !cachedInfo.NotebookSizeComputed {
+		return WSFileInfo{}, false
+	}
+	return cachedInfo, true
+}
+
+func (c *WorkspaceFilesClient) deleteExactNotebookInfo(keys ...string) {
+	if len(keys) == 0 {
+		return
+	}
+
+	c.exactMu.Lock()
+	defer c.exactMu.Unlock()
+	for _, key := range keys {
+		delete(c.exactNotebooks, key)
+	}
+}
+
+func (c *WorkspaceFilesClient) invalidateExactNotebookInfo(filePath string) {
+	targets := notebookInvalidateTargets(filePath)
+
+	c.exactMu.Lock()
+	defer c.exactMu.Unlock()
+
+	for key, info := range c.exactNotebooks {
+		for target := range targets {
+			if pathMatchesInvalidation(key, target) || pathMatchesInvalidation(info.Path, target) {
+				delete(c.exactNotebooks, key)
+				break
+			}
+		}
+	}
+}
+
+func (c *WorkspaceFilesClient) cachedExactNotebookInfo(cacheKey string, info WSFileInfo) (WSFileInfo, bool) {
+	candidates := notebookInfoKeys(cacheKey, info)
+
+	for _, key := range candidates {
+		cachedInfo, found := c.exactNotebookInfoForKey(key)
+		if !found {
+			continue
+		}
+		if !sameNotebookIdentity(info, cachedInfo) {
+			c.deleteExactNotebookInfo(notebookInfoKeys(key, cachedInfo)...)
 			continue
 		}
 		if merged, ok := mergeNotebookExactSize(info, cachedInfo); ok {
 			return merged, true
 		}
+		return info, false
 	}
 
 	return info, false
@@ -567,6 +684,7 @@ func (c *WorkspaceFilesClient) preserveNotebookExactSize(cacheKey string, info f
 	merged, changed := c.cachedExactNotebookInfo(cacheKey, wsInfo)
 	if changed {
 		c.cache.Set(cacheKey, merged)
+		c.setExactNotebookInfo(merged, notebookExactInfoKeys(cacheKey, merged)...)
 		return merged
 	}
 
@@ -591,6 +709,7 @@ func (c *WorkspaceFilesClient) rememberNotebookExactSize(cacheKey string, info W
 	for _, key := range keys {
 		c.cache.Set(key, info)
 	}
+	c.setExactNotebookInfo(info, keys...)
 
 	return info
 }
@@ -1152,10 +1271,14 @@ func (c *WorkspaceFilesClient) Rename(ctx context.Context, source_path string, d
 
 func (c *WorkspaceFilesClient) CacheSet(filePath string, info fs.FileInfo) {
 	c.cache.Set(filePath, info)
+	if wsInfo, ok := toWSFileInfo(info); ok {
+		c.setExactNotebookInfo(wsInfo, notebookExactInfoKeys(filePath, wsInfo)...)
+	}
 }
 
 func (c *WorkspaceFilesClient) CacheInvalidate(filePath string) {
 	c.cache.Invalidate(filePath)
+	c.invalidateExactNotebookInfo(filePath)
 }
 
 func (c *WorkspaceFilesClient) MetadataTTL() time.Duration {

@@ -328,7 +328,7 @@ func TestWSNodeRelease(t *testing.T) {
 	}
 }
 
-func TestReleaseUsesStatFreshForImmediateLookupAndRead(t *testing.T) {
+func TestReleaseUsesLocalMetadataForImmediateLookupAndRead(t *testing.T) {
 	cache, err := filecache.NewDiskCache(t.TempDir(), 1024*1024, time.Hour)
 	if err != nil {
 		t.Fatalf("cache init: %v", err)
@@ -392,8 +392,8 @@ func TestReleaseUsesStatFreshForImmediateLookupAndRead(t *testing.T) {
 	if statCalls != 0 {
 		t.Fatalf("expected stale Stat path to be unused, got %d calls", statCalls)
 	}
-	if statFreshCalls < 2 {
-		t.Fatalf("expected StatFresh to be used for create and flush, got %d calls", statFreshCalls)
+	if statFreshCalls != 1 {
+		t.Fatalf("expected StatFresh to be used only for create, got %d calls", statFreshCalls)
 	}
 	if child.fileInfo.Size() != int64(len(writtenData)) {
 		t.Fatalf("expected child size %d after flush, got %d", len(writtenData), child.fileInfo.Size())
@@ -424,10 +424,11 @@ func TestReleaseUsesStatFreshForImmediateLookupAndRead(t *testing.T) {
 	}
 }
 
-func TestReleaseFallsBackToLocalMetadataWhenStatFreshFails(t *testing.T) {
+func TestReleaseRegularFileUsesLocalMetadataWithoutStatFresh(t *testing.T) {
 	writtenData := []byte("content")
 	oldModifiedAt := time.Now().Add(-time.Hour).UnixMilli()
 	writeCalls := 0
+	statFreshCalls := 0
 
 	api := &databricks.FakeWorkspaceAPI{
 		WriteFunc: func(ctx context.Context, filepath string, data []byte) error {
@@ -435,6 +436,7 @@ func TestReleaseFallsBackToLocalMetadataWhenStatFreshFails(t *testing.T) {
 			return nil
 		},
 		StatFreshFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			statFreshCalls++
 			return nil, fs.ErrPermission
 		},
 	}
@@ -458,6 +460,9 @@ func TestReleaseFallsBackToLocalMetadataWhenStatFreshFails(t *testing.T) {
 	if writeCalls != 1 {
 		t.Fatalf("expected 1 write call, got %d", writeCalls)
 	}
+	if statFreshCalls != 0 {
+		t.Fatalf("expected StatFresh to be unused for regular files, got %d calls", statFreshCalls)
+	}
 	if n.fileInfo.Size() != int64(len(writtenData)) {
 		t.Fatalf("expected size %d after fallback, got %d", len(writtenData), n.fileInfo.Size())
 	}
@@ -472,6 +477,49 @@ func TestReleaseFallsBackToLocalMetadataWhenStatFreshFails(t *testing.T) {
 	}
 	if n.buf.Dirty {
 		t.Fatal("expected dirty flag cleared after release")
+	}
+}
+
+func TestRefreshMetadataLockedPreservesNotebookExactSize(t *testing.T) {
+	modifiedAt := time.Now().UnixMilli()
+	api := &databricks.FakeWorkspaceAPI{
+		StatFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			return databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+				Path:       "/test/notebook",
+				ObjectType: workspace.ObjectTypeNotebook,
+				Language:   workspace.LanguagePython,
+				Size:       1,
+				ModifiedAt: modifiedAt,
+			}}, nil
+		},
+	}
+
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{
+			ObjectInfo: workspace.ObjectInfo{
+				Path:       "/test/notebook",
+				ObjectType: workspace.ObjectTypeNotebook,
+				Language:   workspace.LanguagePython,
+				Size:       44,
+				ModifiedAt: modifiedAt,
+			},
+			NotebookSizeComputed: true,
+		},
+	}
+
+	changed, errno := n.refreshMetadataLocked(context.Background(), true)
+	if errno != 0 {
+		t.Fatalf("refreshMetadataLocked failed: %d", errno)
+	}
+	if changed {
+		t.Fatal("did not expect metadata refresh to treat preserved exact size as a change")
+	}
+	if n.fileInfo.Size() != 44 {
+		t.Fatalf("expected preserved exact size 44, got %d", n.fileInfo.Size())
+	}
+	if !n.fileInfo.NotebookSizeComputed {
+		t.Fatal("expected notebook exact size to stay computed")
 	}
 }
 
@@ -1550,6 +1598,89 @@ func TestEnsureDataLockedUsesCachedNotebookFileSize(t *testing.T) {
 	}
 	if !n.fileInfo.NotebookSizeComputed {
 		t.Fatal("expected cache-backed notebook size to be marked exact")
+	}
+}
+
+func TestFlushNotebookPreservesExactSizeAfterStatFresh(t *testing.T) {
+	notebookContent := []byte("print('hello')\n")
+	cacheSetCalls := 0
+
+	api := &databricks.FakeWorkspaceAPI{
+		WriteFunc: func(ctx context.Context, filepath string, data []byte) error {
+			return nil
+		},
+		StatFreshFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			return databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+				Path:       "/test/notebook",
+				ObjectType: workspace.ObjectTypeNotebook,
+				Language:   workspace.LanguagePython,
+				Size:       1,
+				ModifiedAt: time.Now().UnixMilli(),
+			}}, nil
+		},
+		CacheSetFunc: func(path string, info fs.FileInfo) {
+			cacheSetCalls++
+		},
+	}
+
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			Path:       "/test/notebook",
+			ObjectType: workspace.ObjectTypeNotebook,
+			Language:   workspace.LanguagePython,
+			Size:       1,
+			ModifiedAt: time.Now().Add(-time.Hour).UnixMilli(),
+		}},
+		buf: fileBuffer{Data: append([]byte(nil), notebookContent...), Dirty: true},
+	}
+
+	if errno := n.flushLocked(context.Background()); errno != 0 {
+		t.Fatalf("flushLocked failed: %d", errno)
+	}
+	if n.fileInfo.Size() != int64(len(notebookContent)) {
+		t.Fatalf("expected exact size %d after flush, got %d", len(notebookContent), n.fileInfo.Size())
+	}
+	if !n.fileInfo.NotebookSizeComputed {
+		t.Fatal("expected notebook exact size after flush")
+	}
+	if cacheSetCalls == 0 {
+		t.Fatal("expected exact notebook size to be published to cache")
+	}
+}
+
+func TestFlushNotebookFallsBackToLocalExactSizeWhenStatFreshFails(t *testing.T) {
+	notebookContent := []byte("print('hello')\n")
+
+	api := &databricks.FakeWorkspaceAPI{
+		WriteFunc: func(ctx context.Context, filepath string, data []byte) error {
+			return nil
+		},
+		StatFreshFunc: func(ctx context.Context, filePath string) (fs.FileInfo, error) {
+			return nil, fs.ErrPermission
+		},
+	}
+
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			Path:       "/test/notebook",
+			ObjectType: workspace.ObjectTypeNotebook,
+			Language:   workspace.LanguagePython,
+			Size:       1,
+			ModifiedAt: time.Now().Add(-time.Hour).UnixMilli(),
+		}},
+		buf: fileBuffer{Data: append([]byte(nil), notebookContent...), Dirty: true},
+	}
+
+	if errno := n.flushLocked(context.Background()); errno != 0 {
+		t.Fatalf("flushLocked failed: %d", errno)
+	}
+	if n.fileInfo.Size() != int64(len(notebookContent)) {
+		t.Fatalf("expected local exact size %d after fallback, got %d", len(notebookContent), n.fileInfo.Size())
+	}
+	if !n.fileInfo.NotebookSizeComputed {
+		t.Fatal("expected notebook exact size after fallback")
 	}
 }
 

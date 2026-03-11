@@ -1803,6 +1803,184 @@ func TestStatFreshPreservesExactNotebookSize(t *testing.T) {
 	}
 }
 
+func TestStatPreservesExactNotebookSizeAfterCacheExpiry(t *testing.T) {
+	notebookContent := "# Databricks notebook source\nprint('sticky')\n"
+	modifiedAt := time.Now().UnixMilli()
+	exportCalls := 0
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fnotebook.py") {
+				return fs.ErrNotExist
+			}
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fnotebook") {
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/notebook",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						Size:       1,
+						ModifiedAt: modifiedAt,
+					},
+				}
+				return nil
+			}
+			return fmt.Errorf("unexpected path: %s", path)
+		},
+	}
+
+	mockWorkspace := &MockWorkspaceClient{
+		ExportFunc: func(ctx context.Context, req workspace.ExportRequest) (*workspace.ExportResponse, error) {
+			exportCalls++
+			return &workspace.ExportResponse{
+				Content: base64.StdEncoding.EncodeToString([]byte(notebookContent)),
+			}, nil
+		},
+	}
+
+	cache := metacache.NewCacheWithTTLs(5*time.Millisecond, 5*time.Millisecond)
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, cache)
+
+	if _, err := client.ReadAll(context.Background(), "/test/notebook.py"); err != nil {
+		t.Fatalf("ReadAll failed: %v", err)
+	}
+	if len(client.exactNotebooks) == 0 {
+		t.Fatal("expected exact notebook info to be stored")
+	}
+
+	time.Sleep(20 * time.Millisecond)
+
+	info, err := client.Stat(context.Background(), "/test/notebook.py")
+	if err != nil {
+		t.Fatalf("Stat failed: %v", err)
+	}
+	wsInfo := info.(WSFileInfo)
+	if wsInfo.Size() != int64(len(notebookContent)) {
+		t.Fatalf("expected exact size %d after cache expiry, got %d", len(notebookContent), wsInfo.Size())
+	}
+	if !wsInfo.NotebookSizeComputed {
+		t.Fatal("expected exact notebook size after cache expiry")
+	}
+	if exportCalls != 1 {
+		t.Fatalf("did not expect extra export after cache expiry, got %d calls", exportCalls)
+	}
+}
+
+func TestStatDropsStaleExactNotebookSizeWhenIdentityChanges(t *testing.T) {
+	notebookContent := "# Databricks notebook source\nprint('stale')\n"
+	modifiedAt := time.Now().UnixMilli()
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fnotebook.py") {
+				return fs.ErrNotExist
+			}
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fnotebook") {
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/notebook",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						Size:       1,
+						ModifiedAt: modifiedAt,
+					},
+				}
+				return nil
+			}
+			return fmt.Errorf("unexpected path: %s", path)
+		},
+	}
+
+	mockWorkspace := &MockWorkspaceClient{
+		ExportFunc: func(ctx context.Context, req workspace.ExportRequest) (*workspace.ExportResponse, error) {
+			return &workspace.ExportResponse{
+				Content: base64.StdEncoding.EncodeToString([]byte(notebookContent)),
+			}, nil
+		},
+	}
+
+	cache := metacache.NewCacheWithTTLs(5*time.Millisecond, 5*time.Millisecond)
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, cache)
+
+	if _, err := client.ReadAll(context.Background(), "/test/notebook.py"); err != nil {
+		t.Fatalf("ReadAll failed: %v", err)
+	}
+
+	modifiedAt = time.Now().Add(time.Second).UnixMilli()
+	time.Sleep(20 * time.Millisecond)
+
+	info, err := client.Stat(context.Background(), "/test/notebook.py")
+	if err != nil {
+		t.Fatalf("Stat failed: %v", err)
+	}
+	wsInfo := info.(WSFileInfo)
+	if wsInfo.Size() != 1 {
+		t.Fatalf("expected backend metadata size 1 after identity change, got %d", wsInfo.Size())
+	}
+	if wsInfo.NotebookSizeComputed {
+		t.Fatal("did not expect stale exact notebook size after identity change")
+	}
+	if len(client.exactNotebooks) != 0 {
+		t.Fatalf("expected stale exact notebook info to be removed, got %d entries", len(client.exactNotebooks))
+	}
+}
+
+func TestCacheInvalidateClearsExactNotebookInfo(t *testing.T) {
+	notebookContent := "# Databricks notebook source\nprint('invalidate')\n"
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fnotebook.py") {
+				return fs.ErrNotExist
+			}
+			if strings.Contains(path, "object-info?path=%2Ftest%2Fnotebook") {
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/notebook",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						Size:       1,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				}
+				return nil
+			}
+			return fmt.Errorf("unexpected path: %s", path)
+		},
+	}
+
+	mockWorkspace := &MockWorkspaceClient{
+		ExportFunc: func(ctx context.Context, req workspace.ExportRequest) (*workspace.ExportResponse, error) {
+			return &workspace.ExportResponse{
+				Content: base64.StdEncoding.EncodeToString([]byte(notebookContent)),
+			}, nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, nil)
+
+	if _, err := client.ReadAll(context.Background(), "/test/notebook.py"); err != nil {
+		t.Fatalf("ReadAll failed: %v", err)
+	}
+	if len(client.exactNotebooks) == 0 {
+		t.Fatal("expected exact notebook info to be stored")
+	}
+
+	client.CacheInvalidate("/test/notebook.py")
+	if len(client.exactNotebooks) != 0 {
+		t.Fatalf("expected exact notebook info to be cleared, got %d entries", len(client.exactNotebooks))
+	}
+}
+
 func TestWriteNewNotebookIgnoresDatabricksMissingAliasProbe(t *testing.T) {
 	var uploadCalled bool
 	var uploadedPath string

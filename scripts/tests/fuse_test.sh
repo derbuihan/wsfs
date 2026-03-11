@@ -223,14 +223,46 @@ CHOWN_RC=$?
 set -e
 assert "[ $CHOWN_RC -ne 0 ]" "chown returns error (not supported)"
 
-# git init compatibility (requires chmod no-op support)
+# Git compatibility smoke (requires chmod no-op support)
 if command -v git >/dev/null 2>&1; then
   run_cmd 'mkdir gitrepo'
   assert_exit_code 0 '(cd gitrepo && git init)' "git init succeeds on wsfs"
   assert_file_exists "gitrepo/.git/config" "git init creates .git/config"
+  assert_exit_code 0 '(cd gitrepo && git config user.name "wsfs-test" && git config user.email "wsfs-test@example.com")' "git local user config succeeds"
+  run_cmd 'printf "# Databricks notebook source\nprint(1)\n" > gitrepo/notebook.py'
+  run_cmd 'printf "hello\n" > gitrepo/regular.txt'
+  GIT_STATUS=$(cd gitrepo && git status --short)
+  assert_contains "$GIT_STATUS" "?? notebook.py" "git status shows untracked notebook source"
+  assert_contains "$GIT_STATUS" "?? regular.txt" "git status shows untracked regular file"
+  assert_exit_code 0 '(cd gitrepo && git add .)' "git add succeeds on wsfs"
+  assert_exit_code 0 '(cd gitrepo && git commit -m "initial commit")' "git commit succeeds on wsfs"
+  GIT_STATUS=$(cd gitrepo && git status --short)
+  assert_eq "" "$GIT_STATUS" "git status is clean after commit"
+  run_cmd 'printf "# Databricks notebook source\nprint(2)\n" > gitrepo/notebook.py'
+  GIT_STATUS=$(cd gitrepo && git status --short)
+  assert_contains "$GIT_STATUS" "M notebook.py" "git status shows tracked notebook modification"
   assert_exit_code 0 '(cd gitrepo && git rev-parse --is-inside-work-tree)' "git repo is usable after init"
+  GIT_HEAD=$(cd gitrepo && git rev-parse HEAD)
+  assert "[ -n \"$GIT_HEAD\" ]" "git rev-parse HEAD returns a commit id"
+  GIT_SUBJECT=$(cd gitrepo && git log -1 --format=%s)
+  assert_eq "initial commit" "$GIT_SUBJECT" "git log returns the latest commit subject"
+
+  assert_exit_code 0 '(cd gitrepo && git add notebook.py && git commit -m "notebook update")' "git commit succeeds after notebook modification"
+  run_cmd 'printf "print(\"plain\")\n" > gitrepo/script.py'
+  assert_exit_code 0 '(cd gitrepo && git add script.py && git commit -m "plain script commit")' "git commit succeeds for plain .py file"
+  GIT_STATUS=$(cd gitrepo && git status --short)
+  assert_eq "" "$GIT_STATUS" "plain .py file is clean immediately after commit"
+  sleep 11
+  GIT_STATUS=$(cd gitrepo && git status --short)
+  assert_eq "" "$GIT_STATUS" "plain .py file stays clean after TTL expiry"
+  set +e
+  GIT_DIFF=$(cd gitrepo && git diff -- script.py 2>&1)
+  GIT_DIFF_RC=$?
+  set -e
+  assert "[ $GIT_DIFF_RC -eq 0 ]" "git diff succeeds for plain .py after TTL expiry"
+  assert_eq "" "$GIT_DIFF" "git diff for plain .py stays empty after TTL expiry"
 else
-  skip_test "git not installed; skipping git init compatibility check"
+  skip_test "git not installed; skipping git compatibility smoke"
 fi
 
 # ============================================

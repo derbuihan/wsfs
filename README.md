@@ -261,6 +261,8 @@ go test ./...
 ./scripts/test_vscode_docker.sh
 ```
 
+These three commands are the standard test path. The `rg` / `git` diagnostics below are manual troubleshooting tools, not part of the standard Docker suite.
+
 **Prerequisites:**
 - Set `DATABRICKS_HOST` and `DATABRICKS_TOKEN` in `.env` file
 - Docker with Compose support and FUSE-capable privileged containers
@@ -270,17 +272,15 @@ go test ./...
 | Suite | Script | Description |
 |-------|--------|-------------|
 | **Mounted test runner** | `scripts/tests/run.sh` | Runs the shell suites against an already-mounted wsfs filesystem |
-| **FUSE tests** | `scripts/tests/fuse_test.sh` | File/directory operations, vim compatibility, timestamp-only `Setattr` expectations |
+| **FUSE tests** | `scripts/tests/fuse_test.sh` | File/directory operations, vim compatibility, timestamp-only `Setattr` expectations, Git compatibility smoke |
 | **Cache tests** | `scripts/tests/cache_test.sh` | Default cache population, invalidation, and out-of-band remote refresh checks |
 | **Stress tests** | `scripts/tests/stress_test.sh` | Concurrent access, rapid truncate, rename |
 | **Security / allow-other** | `scripts/tests/security_test.sh` | Validates `--allow-other` exposure semantics with a second local user |
-| **`rg` diagnostic** | `scripts/tests/rg_diagnostic.sh` | Prints cold/warm ripgrep timings and recent debug-log excerpts for mounted search workloads |
-| **`git` diagnostic** | `scripts/tests/git_diagnostic.sh` | Prints cold/warm Git metadata timings and recent debug-log excerpts for mounted repos |
 | **Docker shell** | `scripts/run_wsfs_docker.sh` | Common Docker wrapper that builds, mounts, and runs a shell or command |
 | **Docker integration wrapper** | `scripts/test_docker.sh` | Runs the standard integration suites, including a separate `--allow-other` security stage |
 | **VSCode core dev loop** | `scripts/test_vscode_docker.sh` | Runs the VSCode E2E project in `scripts/tests/vscode/` |
 
-### Test Options
+### Standard Test Options
 
 ```bash
 # Open an interactive shell with wsfs mounted inside Docker
@@ -288,15 +288,6 @@ go test ./...
 
 # Run shell suites against an existing mount
 ./scripts/tests/run.sh /mnt/wsfs --fuse-only
-
-# Print cold/warm ripgrep diagnostics against a mounted tree
-./scripts/tests/rg_diagnostic.sh /mnt/wsfs /tmp/wsfs.log
-
-# Print cold/warm Git diagnostics against a mounted tree
-./scripts/tests/git_diagnostic.sh /mnt/wsfs /tmp/wsfs.log
-
-# Move Git metadata outside a mounted worktree
-git -C /mnt/wsfs/path/to/repo init --separate-git-dir ~/.local/state/wsfs/gitdirs/my-repo.git
 
 # Run specific Docker-backed test suites
 ./scripts/test_docker.sh --fuse-only
@@ -310,6 +301,18 @@ git -C /mnt/wsfs/path/to/repo init --separate-git-dir ~/.local/state/wsfs/gitdir
 ./scripts/test_docker.sh --build
 ./scripts/test_vscode_docker.sh --build
 ./scripts/run_wsfs_docker.sh --build
+```
+
+### Manual Diagnostics
+
+These commands are for performance investigation and before/after comparisons. They are not part of `./scripts/test_docker.sh`.
+
+```bash
+# Print cold/warm ripgrep diagnostics against a mounted tree
+./scripts/tests/rg_diagnostic.sh /mnt/wsfs /tmp/wsfs.log
+
+# Print cold/warm Git diagnostics against a mounted tree
+./scripts/tests/git_diagnostic.sh /mnt/wsfs /tmp/wsfs.log
 ```
 
 ### Debug Logging

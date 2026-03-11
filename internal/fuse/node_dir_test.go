@@ -324,6 +324,44 @@ func TestWSNodeCreateFile(t *testing.T) {
 	}
 }
 
+func TestWSNodeCreateFileFirstWriteSkipsRemoteRead(t *testing.T) {
+	readAllCalls := 0
+	api := &databricks.FakeWorkspaceAPI{
+		ReadAllFunc: func(ctx context.Context, filePath string) ([]byte, error) {
+			readAllCalls++
+			return []byte("unexpected"), nil
+		},
+		WriteFunc: func(ctx context.Context, filepath string, data []byte) error {
+			return nil
+		},
+		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			return databricks.NewTestFileInfo(filePath, 0, false), nil
+		},
+	}
+
+	root := newTestRootNode(t, api)
+	out := &fuse.EntryOut{}
+	child, _, _, errno := root.Create(context.Background(), "file.txt", 0, 0644, out)
+	if errno != 0 || child == nil {
+		t.Fatalf("Create failed: errno=%d child=%v", errno, child)
+	}
+
+	node, ok := child.Operations().(*WSNode)
+	if !ok {
+		t.Fatalf("expected WSNode child, got %T", child.Operations())
+	}
+
+	if _, errno := node.Write(context.Background(), nil, []byte("first write"), 0); errno != 0 {
+		t.Fatalf("Write failed: %d", errno)
+	}
+	if readAllCalls != 0 {
+		t.Fatalf("expected first write to skip remote ReadAll, got %d calls", readAllCalls)
+	}
+	if got := string(node.buf.Data); got != "first write" {
+		t.Fatalf("unexpected buffered content after first write: %q", got)
+	}
+}
+
 func TestWSNodeCreateNotebook(t *testing.T) {
 	var wroteData []byte
 	api := &databricks.FakeWorkspaceAPI{

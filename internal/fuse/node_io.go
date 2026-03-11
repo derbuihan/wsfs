@@ -222,6 +222,7 @@ func (n *WSNode) flushLocked(ctx context.Context) syscall.Errno {
 	defer cancel()
 
 	remotePath := n.Path()
+	bufferSize := int64(len(n.buf.Data))
 	err := n.wfClient.Write(opCtx, remotePath, n.buf.Data)
 	if err != nil {
 		logging.Warnf("Error writing back on Flush for %s: %v", remotePath, err)
@@ -229,15 +230,24 @@ func (n *WSNode) flushLocked(ctx context.Context) syscall.Errno {
 	}
 	n.clearDirtyLocked()
 
-	if info, err := n.wfClient.StatFresh(opCtx, remotePath); err != nil {
-		logging.Warnf("Error refreshing file info after Flush for %s: %v", remotePath, err)
-		n.applyBufferedMetadataFallbackLocked(time.Now())
-	} else if wsInfo, ok := info.(databricks.WSFileInfo); !ok {
-		logging.Warnf("Unexpected file info type after Flush for %s", remotePath)
-		n.applyBufferedMetadataFallbackLocked(time.Now())
+	now := time.Now()
+	if n.fileInfo.IsNotebook() {
+		if info, err := n.wfClient.StatFresh(opCtx, remotePath); err != nil {
+			logging.Warnf("Error refreshing file info after Flush for %s: %v", remotePath, err)
+			n.applyBufferedMetadataFallbackLocked(now)
+		} else if wsInfo, ok := info.(databricks.WSFileInfo); !ok {
+			logging.Warnf("Unexpected file info type after Flush for %s", remotePath)
+			n.applyBufferedMetadataFallbackLocked(now)
+		} else {
+			n.fileInfo = wsInfo
+			n.metadataCheckedAt = now
+		}
+		n.rememberNotebookExactSizeLocked(bufferSize)
 	} else {
-		n.fileInfo = wsInfo
-		n.metadataCheckedAt = time.Now()
+		n.applyBufferedMetadataFallbackLocked(now)
+		if n.wfClient != nil {
+			n.wfClient.CacheSet(remotePath, n.fileInfo)
+		}
 	}
 
 	// Update cache with new content

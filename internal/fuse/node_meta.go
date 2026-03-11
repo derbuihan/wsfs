@@ -27,6 +27,31 @@ func fileInfoChanged(oldInfo, newInfo databricks.WSFileInfo) bool {
 		oldInfo.Path != newInfo.Path
 }
 
+func sameNotebookIdentityLocal(a, b databricks.WSFileInfo) bool {
+	if !a.IsNotebook() || !b.IsNotebook() {
+		return false
+	}
+	return a.Path == b.Path &&
+		a.ModifiedAt == b.ModifiedAt &&
+		a.ObjectId == b.ObjectId &&
+		a.ResourceId == b.ResourceId
+}
+
+func mergeNotebookExactSizeLocal(info, exact databricks.WSFileInfo) (databricks.WSFileInfo, bool) {
+	if !info.IsNotebook() || !exact.IsNotebook() || !exact.NotebookSizeComputed {
+		return info, false
+	}
+	if !sameNotebookIdentityLocal(info, exact) {
+		return info, false
+	}
+	if info.NotebookSizeComputed && info.Size() == exact.Size() {
+		return info, false
+	}
+	info.ObjectInfo.Size = exact.Size()
+	info.NotebookSizeComputed = true
+	return info, true
+}
+
 func (n *WSNode) metadataFreshLocked() bool {
 	if n.metadataCheckedAt.IsZero() {
 		return false
@@ -79,6 +104,9 @@ func (n *WSNode) refreshMetadataLocked(ctx context.Context, bypassCache bool) (b
 	if !ok {
 		logging.Debugf("refreshMetadata: unexpected file info type for %s", n.Path())
 		return false, syscall.EIO
+	}
+	if merged, ok := mergeNotebookExactSizeLocal(wsInfo, n.fileInfo); ok {
+		wsInfo = merged
 	}
 
 	changed := fileInfoChanged(n.fileInfo, wsInfo)

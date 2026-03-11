@@ -348,7 +348,12 @@ func (n *WSNode) Create(ctx context.Context, name string, flags uint32, mode uin
 		ok = true
 	}
 	childNode := n.newChildNode(wsInfo)
-	childNode.buf = fileBuffer{Data: initialContent, ReplaceOnFirstWrite: len(initialContent) > 0}
+	childNode.buf = fileBuffer{ReplaceOnFirstWrite: len(initialContent) > 0}
+	if len(initialContent) > 0 {
+		childNode.buf.Data = initialContent
+	} else {
+		childNode.buf.Data = []byte{}
+	}
 	childNode.allowPostCreateTimestamps = true
 	childNode.incrementOpenLocked()
 	childNode.fillAttr(ctx, &out.Attr)
