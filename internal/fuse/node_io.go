@@ -30,6 +30,14 @@ func (n *WSNode) rememberNotebookExactSizeLocked(size int64) {
 	}
 }
 
+func (n *WSNode) ensureNotebookExactSizeLocked(ctx context.Context) syscall.Errno {
+	if !n.fileInfo.IsNotebook() || n.fileInfo.NotebookSizeComputed || n.isDirtyLocked() {
+		return 0
+	}
+
+	return n.ensureDataLocked(ctx)
+}
+
 func (n *WSNode) ensureDataLocked(ctx context.Context) syscall.Errno {
 	// If dirty, data must already be in memory
 	if n.isDirtyLocked() {
@@ -290,13 +298,16 @@ func (n *WSNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 		n.markModifiedLocked(time.Now())
 		n.metadataCheckedAt = time.Now()
 	}
+	if flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_TRUNC) == 0 {
+		if errno := n.ensureNotebookExactSizeLocked(ctx); errno != 0 {
+			return nil, 0, errno
+		}
+	}
 
 	openFlags := uint32(0)
 	if flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_TRUNC) != 0 {
 		openFlags |= fuse.FOPEN_DIRECT_IO
 	} else if metadataChanged {
-		openFlags |= fuse.FOPEN_DIRECT_IO
-	} else if n.fileInfo.IsNotebook() && !n.fileInfo.NotebookSizeComputed {
 		openFlags |= fuse.FOPEN_DIRECT_IO
 	} else {
 		openFlags |= fuse.FOPEN_KEEP_CACHE

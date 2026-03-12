@@ -173,6 +173,69 @@ func TestWSNodeLookupUsesCleanChildWithinTTL(t *testing.T) {
 	}
 }
 
+func TestWSNodeLookupUsesCleanNotebookChildWithinTTLAndLearnsExactSize(t *testing.T) {
+	notebookContent := []byte("# Databricks notebook source\nprint('ttl')\n")
+	statCalls := 0
+	readAllCalls := 0
+	api := &databricks.FakeWorkspaceAPI{
+		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			statCalls++
+			return databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+				ObjectType: workspace.ObjectTypeNotebook,
+				Path:       "/note",
+				Language:   workspace.LanguagePython,
+				Size:       1,
+				ModifiedAt: time.Now().UnixMilli(),
+			}}, nil
+		},
+		ReadAllFunc: func(ctx context.Context, filePath string) ([]byte, error) {
+			readAllCalls++
+			if filePath != "/note" {
+				t.Fatalf("expected notebook read path /note, got %s", filePath)
+			}
+			return notebookContent, nil
+		},
+	}
+
+	root := newTestRootNode(t, api)
+	ctx := context.Background()
+
+	childNode := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeNotebook,
+			Path:       "/note",
+			Language:   workspace.LanguagePython,
+			Size:       1,
+			ModifiedAt: time.Now().UnixMilli(),
+		}},
+		metadataCheckedAt: time.Now(),
+	}
+	childInode := root.NewPersistentInode(ctx, childNode, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno(childNode.fileInfo)})
+	root.AddChild("note.py", childInode, false)
+
+	out := &fuse.EntryOut{}
+	inode, errno := root.Lookup(ctx, "note.py", out)
+	if errno != 0 {
+		t.Fatalf("Lookup errno: %d", errno)
+	}
+	if inode != childInode {
+		t.Fatalf("expected existing inode")
+	}
+	if statCalls != 0 {
+		t.Fatalf("expected no Stat calls, got %d", statCalls)
+	}
+	if readAllCalls != 1 {
+		t.Fatalf("expected one notebook read during Lookup, got %d", readAllCalls)
+	}
+	if out.Attr.Size != uint64(len(notebookContent)) {
+		t.Fatalf("expected exact notebook size %d, got %d", len(notebookContent), out.Attr.Size)
+	}
+	if !childNode.fileInfo.NotebookSizeComputed {
+		t.Fatal("expected notebook exact size to be learned during Lookup")
+	}
+}
+
 func TestWSNodeLookupErrors(t *testing.T) {
 	api := &databricks.FakeWorkspaceAPI{
 		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
@@ -236,6 +299,52 @@ func TestWSNodeLookupSuccess(t *testing.T) {
 	}
 	if child.ownerUid != root.ownerUid || child.ownerGid != root.ownerGid || child.restrictAccess != root.restrictAccess {
 		t.Fatal("child did not inherit access config")
+	}
+}
+
+func TestWSNodeLookupNotebookLearnsExactSize(t *testing.T) {
+	notebookContent := []byte("# Databricks notebook source\nprint('lookup')\n")
+	readAllCalls := 0
+	api := &databricks.FakeWorkspaceAPI{
+		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			if filePath != "/note.py" {
+				t.Fatalf("expected lookup stat path /note.py, got %s", filePath)
+			}
+			return databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+				ObjectType: workspace.ObjectTypeNotebook,
+				Path:       "/note",
+				Language:   workspace.LanguagePython,
+				Size:       1,
+				ModifiedAt: time.Now().UnixMilli(),
+			}}, nil
+		},
+		ReadAllFunc: func(ctx context.Context, filePath string) ([]byte, error) {
+			readAllCalls++
+			if filePath != "/note" {
+				t.Fatalf("expected notebook read path /note, got %s", filePath)
+			}
+			return notebookContent, nil
+		},
+	}
+
+	root := newTestRootNode(t, api)
+	out := &fuse.EntryOut{}
+	inode, errno := root.Lookup(context.Background(), "note.py", out)
+	if errno != 0 || inode == nil {
+		t.Fatalf("Lookup failed: errno=%d inode=%v", errno, inode)
+	}
+	if readAllCalls != 1 {
+		t.Fatalf("expected one notebook read during Lookup, got %d", readAllCalls)
+	}
+	if out.Attr.Size != uint64(len(notebookContent)) {
+		t.Fatalf("expected exact notebook size %d, got %d", len(notebookContent), out.Attr.Size)
+	}
+	child, ok := inode.Operations().(*WSNode)
+	if !ok {
+		t.Fatal("expected WSNode child")
+	}
+	if !child.fileInfo.NotebookSizeComputed {
+		t.Fatal("expected notebook exact size to be learned during Lookup")
 	}
 }
 

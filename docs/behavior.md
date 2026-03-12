@@ -47,7 +47,7 @@ Important details:
 
 - Clean read-only `Open` reuses cached metadata while the metadata TTL is still fresh (`10s` by default).
 - Once the metadata TTL expires, the next `Lookup` / `Getattr` / read-only `Open` rechecks remote metadata.
-- Notebook source files do not export during metadata-only paths such as `stat(2)` / `lookup`; wsfs learns the exact exported source size when notebook content is read and keeps reusing it while the notebook identity stays unchanged.
+- Visible notebook source files materialize exact exported source size on metadata paths (`stat(2)` / `lookup` / first read-only `open`) when the size is not known yet, then keep reusing it while the notebook identity stays unchanged.
 - If that metadata changed, wsfs:
   - drops any clean in-memory buffer
   - invalidates related disk-cache entries

@@ -968,6 +968,44 @@ func TestWSNodeGetattrUsesMountOwnerIDs(t *testing.T) {
 	}
 }
 
+func TestWSNodeGetattrNotebookLearnsExactSize(t *testing.T) {
+	notebookContent := []byte("# Databricks notebook source\nprint('hello')\n")
+	readAllCalls := 0
+
+	api := &databricks.FakeWorkspaceAPI{
+		ReadAllFunc: func(ctx context.Context, filePath string) ([]byte, error) {
+			readAllCalls++
+			return notebookContent, nil
+		},
+	}
+
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeNotebook,
+			Path:       "/test/notebook",
+			Language:   workspace.LanguagePython,
+			Size:       1,
+			ModifiedAt: time.Now().UnixMilli(),
+		}},
+		metadataCheckedAt: time.Now(),
+	}
+
+	out := &fuse.AttrOut{}
+	if errno := n.Getattr(context.Background(), nil, out); errno != 0 {
+		t.Fatalf("Getattr failed with errno: %d", errno)
+	}
+	if out.Size != uint64(len(notebookContent)) {
+		t.Fatalf("expected exact notebook size %d, got %d", len(notebookContent), out.Size)
+	}
+	if readAllCalls != 1 {
+		t.Fatalf("expected one notebook read during Getattr, got %d", readAllCalls)
+	}
+	if !n.fileInfo.NotebookSizeComputed {
+		t.Fatal("expected exact notebook size to be learned during Getattr")
+	}
+}
+
 // TestWSNodeAccess tests Access without restriction (allow all)
 func TestWSNodeAccess(t *testing.T) {
 	n := &WSNode{
@@ -1507,7 +1545,7 @@ func TestOpenReadOnlyDefersRemoteRead(t *testing.T) {
 	}
 }
 
-func TestOpenReadOnlyNotebookWithoutExactSizeUsesDirectIOAndLearnsSize(t *testing.T) {
+func TestOpenReadOnlyNotebookWithoutExactSizeLearnsSizeAndKeepsCache(t *testing.T) {
 	notebookContent := []byte("# Databricks notebook source\nprint('hello')\n")
 	modTime := time.Now()
 	readAllCalls := 0
@@ -1534,12 +1572,21 @@ func TestOpenReadOnlyNotebookWithoutExactSizeUsesDirectIOAndLearnsSize(t *testin
 	if _, openFlags, errno := n.Open(context.Background(), 0); errno != 0 {
 		t.Fatalf("Open failed: %d", errno)
 	} else {
-		if openFlags&fuse.FOPEN_DIRECT_IO == 0 {
-			t.Fatalf("expected DIRECT_IO for notebook without exact size, got flags=%d", openFlags)
+		if openFlags&fuse.FOPEN_DIRECT_IO != 0 {
+			t.Fatalf("did not expect DIRECT_IO for unchanged notebook open, got flags=%d", openFlags)
 		}
-		if openFlags&fuse.FOPEN_KEEP_CACHE != 0 {
-			t.Fatalf("did not expect KEEP_CACHE for notebook without exact size, got flags=%d", openFlags)
+		if openFlags&fuse.FOPEN_KEEP_CACHE == 0 {
+			t.Fatalf("expected KEEP_CACHE for notebook after exact size learning, got flags=%d", openFlags)
 		}
+	}
+	if readAllCalls != 1 {
+		t.Fatalf("expected one notebook read during Open, got %d", readAllCalls)
+	}
+	if n.fileInfo.Size() != int64(len(notebookContent)) {
+		t.Fatalf("expected learned notebook size %d after Open, got %d", len(notebookContent), n.fileInfo.Size())
+	}
+	if !n.fileInfo.NotebookSizeComputed {
+		t.Fatal("expected notebook exact size to be learned during Open")
 	}
 
 	result, errno := n.Read(context.Background(), nil, make([]byte, len(notebookContent)+8), 0)
@@ -1551,13 +1598,7 @@ func TestOpenReadOnlyNotebookWithoutExactSizeUsesDirectIOAndLearnsSize(t *testin
 		t.Fatalf("unexpected notebook data: %q", string(data))
 	}
 	if readAllCalls != 1 {
-		t.Fatalf("expected one notebook read, got %d", readAllCalls)
-	}
-	if n.fileInfo.Size() != int64(len(notebookContent)) {
-		t.Fatalf("expected learned notebook size %d, got %d", len(notebookContent), n.fileInfo.Size())
-	}
-	if !n.fileInfo.NotebookSizeComputed {
-		t.Fatal("expected notebook exact size to be learned after Read")
+		t.Fatalf("expected no extra notebook read after Open, got %d", readAllCalls)
 	}
 }
 

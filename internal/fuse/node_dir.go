@@ -244,6 +244,10 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 		if ok {
 			existingNode.mu.Lock()
 			if existingNode.isDirtyLocked() || existingNode.metadataFreshLocked() {
+				if errno := existingNode.ensureNotebookExactSizeLocked(ctx); errno != 0 {
+					existingNode.mu.Unlock()
+					return nil, errno
+				}
 				// Use existing node's state - it has uncommitted changes
 				existingNode.fillAttr(ctx, &out.Attr)
 				if existingNode.buf.Data != nil {
@@ -279,6 +283,9 @@ func (n *WSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*
 	}
 
 	childNode := n.newChildNode(wsInfo)
+	if errno := childNode.ensureNotebookExactSizeLocked(opCtx); errno != 0 {
+		return nil, errno
+	}
 	childNode.fillAttr(ctx, &out.Attr)
 
 	n.setEntryOutTimeouts(out)

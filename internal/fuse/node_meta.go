@@ -163,6 +163,9 @@ func (n *WSNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOu
 	if errno := n.refreshMetadataIfNeededLocked(ctx); errno != 0 {
 		return errno
 	}
+	if errno := n.ensureNotebookExactSizeLocked(ctx); errno != 0 {
+		return errno
+	}
 
 	n.fillAttr(ctx, &out.Attr)
 
