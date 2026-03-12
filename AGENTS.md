@@ -19,7 +19,8 @@
 
 # Notes
 - Preserve established filesystem semantics; see `docs/behavior.md` when touching FUSE behavior.
-- Required env vars: `DATABRICKS_HOST`, `DATABRICKS_TOKEN`
+- Required env vars for Docker/integration runs: `DATABRICKS_HOST`, `DATABRICKS_TOKEN`
+- Go unit tests (`go test ./...`) must stay hermetic and not require Databricks env vars.
 - Never commit `.env`.
 
 See `README.md` for detailed workflow and troubleshooting.

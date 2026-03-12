@@ -79,6 +79,8 @@
 
 - [x] direct `.git` 互換を強化（rename-overwrite の destination stale/dirty 保護、Git smoke を init/status/add/commit artifact まで拡張、docs 更新）
 - [x] Git smoke に notebook size 回帰を追加（source notebook の `stat` size / Git object size / TTL 後整合を確認）
+- [x] Go unit test coverage を改善（85.2%、Databricks alias/cache/new-files edge と FUSE cache-mutation/rename refresh を補強、未使用 private helper を整理）
+- [x] APIKEY不要の hermetic Go unit test 契約を拡充（`main` error policy の pure helper 化、`pathutil`/`filecache`/`metacache` の pure helper・expiry・invalidate 契約追加、CI に空の Databricks env を明示、README/AGENTS 更新）
 
 ---
 

@@ -249,8 +249,8 @@ wsfs includes comprehensive test suites covering FUSE operations, caching behavi
 ### Quick Start
 
 ```bash
-# Go unit tests (no .env required)
-go test ./...
+# Go unit tests (no .env / no Databricks secrets required)
+DATABRICKS_HOST= DATABRICKS_TOKEN= go test ./...
 
 # Open a Docker shell with wsfs mounted inside the container
 ./scripts/run_wsfs_docker.sh
@@ -265,7 +265,8 @@ go test ./...
 These three commands are the standard test path. The `rg` / `git` diagnostics below are manual troubleshooting tools, not part of the standard Docker suite.
 
 **Prerequisites:**
-- Set `DATABRICKS_HOST` and `DATABRICKS_TOKEN` in `.env` file
+- Go unit tests: no `.env`, no Databricks workspace, and no secrets required
+- Docker integration / VSCode integration: set `DATABRICKS_HOST` and `DATABRICKS_TOKEN` in `.env`
 - Docker with Compose support and FUSE-capable privileged containers
 
 ### Test Suites

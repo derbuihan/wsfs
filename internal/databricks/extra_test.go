@@ -100,6 +100,9 @@ func TestFakeWorkspaceAPIDefaults(t *testing.T) {
 
 	api.CacheSet("/file", nil)
 	api.CacheInvalidate("/file")
+	if got := api.MetadataTTL(); got != time.Second {
+		t.Fatalf("MetadataTTL() = %v, want 1s", got)
+	}
 }
 
 func TestNewTestFileInfoHelpers(t *testing.T) {
@@ -152,5 +155,28 @@ func TestWorkspaceFilesClientIsDirIsFileStatError(t *testing.T) {
 	}
 	if ok, err := client.IsFile(context.Background(), "/missing"); err == nil || ok {
 		t.Fatalf("expected IsFile error")
+	}
+}
+
+func TestMockClientsDefaultErrors(t *testing.T) {
+	ctx := context.Background()
+
+	workspaceClient := &MockWorkspaceClient{}
+	if _, err := workspaceClient.Export(ctx, workspace.ExportRequest{}); err == nil {
+		t.Fatal("expected Export default error")
+	}
+	if err := workspaceClient.Delete(ctx, workspace.Delete{}); err == nil {
+		t.Fatal("expected Delete default error")
+	}
+	if err := workspaceClient.Mkdirs(ctx, workspace.Mkdirs{}); err == nil {
+		t.Fatal("expected Mkdirs default error")
+	}
+	if err := workspaceClient.Upload(ctx, "/file", nil); err == nil {
+		t.Fatal("expected Upload default error")
+	}
+
+	apiClient := &MockAPIClient{}
+	if err := apiClient.Do(ctx, http.MethodGet, "/test", nil, nil, nil, nil); err == nil {
+		t.Fatal("expected Do default error")
 	}
 }

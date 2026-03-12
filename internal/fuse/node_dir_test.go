@@ -968,3 +968,73 @@ func TestWSNodeUnlinkDirectoryNameReject(t *testing.T) {
 		t.Fatalf("expected EINVAL, got %d", errno)
 	}
 }
+
+func TestRenameTargetPath(t *testing.T) {
+	notebookInfo := databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+		ObjectType: workspace.ObjectTypeNotebook,
+		Path:       "/dir/note",
+		Language:   workspace.LanguagePython,
+	}}
+
+	if got := renameTargetPath(notebookInfo, "/dir/renamed.sql"); got != "/dir/renamed" {
+		t.Fatalf("renameTargetPath(notebook, source suffix) = %q, want /dir/renamed", got)
+	}
+	if got := renameTargetPath(notebookInfo, "/dir/renamed.ipynb"); got != "/dir/renamed" {
+		t.Fatalf("renameTargetPath(notebook, fallback suffix) = %q, want /dir/renamed", got)
+	}
+
+	regularInfo := databricks.NewTestFileInfo("/dir/file.txt", 1, false)
+	if got := renameTargetPath(regularInfo, "/dir/renamed.txt"); got != "/dir/renamed.txt" {
+		t.Fatalf("renameTargetPath(regular) = %q, want /dir/renamed.txt", got)
+	}
+}
+
+func TestSynthesizedCreatedFileInfo(t *testing.T) {
+	regular := synthesizedCreatedFileInfo("/dir/file.txt", []byte("abc"))
+	if regular.Path != "/dir/file.txt" {
+		t.Fatalf("regular synthesized path = %q, want /dir/file.txt", regular.Path)
+	}
+	if regular.ObjectType != workspace.ObjectTypeFile {
+		t.Fatalf("regular synthesized object type = %s, want FILE", regular.ObjectType)
+	}
+	if regular.Size() != 3 {
+		t.Fatalf("regular synthesized size = %d, want 3", regular.Size())
+	}
+
+	notebook := synthesizedCreatedFileInfo("/dir/note.py", []byte("# Databricks notebook source\n"))
+	if notebook.Path != "/dir/note" {
+		t.Fatalf("notebook synthesized path = %q, want /dir/note", notebook.Path)
+	}
+	if notebook.ObjectType != workspace.ObjectTypeNotebook {
+		t.Fatalf("notebook synthesized object type = %s, want NOTEBOOK", notebook.ObjectType)
+	}
+	if notebook.Language != workspace.LanguagePython {
+		t.Fatalf("notebook synthesized language = %q, want PYTHON", notebook.Language)
+	}
+	if !notebook.NotebookSizeComputed {
+		t.Fatal("expected notebook exact size to be marked computed")
+	}
+}
+
+func TestPathHasPrefix(t *testing.T) {
+	tests := []struct {
+		name   string
+		path   string
+		prefix string
+		want   bool
+	}{
+		{name: "exact match", path: "/dir/file.txt", prefix: "/dir/file.txt", want: true},
+		{name: "child path", path: "/dir/sub/file.txt", prefix: "/dir", want: true},
+		{name: "prefix boundary respected", path: "/dir-two/file.txt", prefix: "/dir", want: false},
+		{name: "root matches absolute path", path: "/dir/file.txt", prefix: "/", want: true},
+		{name: "root does not match relative path", path: "dir/file.txt", prefix: "/", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pathHasPrefix(tt.path, tt.prefix); got != tt.want {
+				t.Fatalf("pathHasPrefix(%q, %q) = %v, want %v", tt.path, tt.prefix, got, tt.want)
+			}
+		})
+	}
+}

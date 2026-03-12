@@ -77,19 +77,6 @@ func renameTargetPath(sourceInfo databricks.WSFileInfo, visiblePath string) stri
 	return visiblePath
 }
 
-func notebookRenameChangesLanguage(sourceInfo databricks.WSFileInfo, visiblePath string) bool {
-	if !sourceInfo.IsNotebook() {
-		return false
-	}
-
-	_, targetLanguage, ok := pathutil.NotebookRemotePathFromSourcePath(visiblePath)
-	if !ok {
-		return false
-	}
-
-	return targetLanguage != sourceInfo.Language
-}
-
 func flushRenameChildIfDirty(ctx context.Context, inode *fs.Inode) syscall.Errno {
 	if inode == nil {
 		return 0

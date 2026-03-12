@@ -5,6 +5,7 @@ import (
 	iofs "io/fs"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/databricks/databricks-sdk-go/service/workspace"
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -34,6 +35,15 @@ func readNodeText(t *testing.T, node *WSNode) string {
 	}
 	return string(data)
 }
+
+type renameOtherFileInfo struct{}
+
+func (renameOtherFileInfo) Name() string        { return "other" }
+func (renameOtherFileInfo) Size() int64         { return 0 }
+func (renameOtherFileInfo) Mode() iofs.FileMode { return 0 }
+func (renameOtherFileInfo) ModTime() time.Time  { return time.Unix(0, 0) }
+func (renameOtherFileInfo) IsDir() bool         { return false }
+func (renameOtherFileInfo) Sys() any            { return nil }
 
 func TestRenameUpdatesDescendantPaths(t *testing.T) {
 	api := &databricks.FakeWorkspaceAPI{
@@ -708,5 +718,254 @@ func TestRenameRegularFileOverwriteDirtyDestinationStopsRename(t *testing.T) {
 	}
 	if got := sourceNode.fileInfo.Path; got != sourcePath {
 		t.Fatalf("expected source path to remain unchanged, got %q", got)
+	}
+}
+
+func TestRenameRefreshFallsBackFromVisiblePathToActualPath(t *testing.T) {
+	const (
+		sourcePath    = "/dir/file"
+		destPath      = "/dir/renamed"
+		sourceVisible = "/dir/file.py"
+		destVisible   = "/dir/renamed.sql"
+	)
+
+	renamed := false
+	statFreshCalls := []string{}
+
+	api := &databricks.FakeWorkspaceAPI{
+		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			switch filePath {
+			case sourceVisible, sourcePath:
+				if renamed {
+					return nil, iofs.ErrNotExist
+				}
+				return testNotebookInfo(sourcePath, workspace.LanguagePython), nil
+			default:
+				return nil, iofs.ErrNotExist
+			}
+		},
+		StatFreshFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			statFreshCalls = append(statFreshCalls, filePath)
+			switch filePath {
+			case destVisible:
+				return nil, iofs.ErrNotExist
+			case destPath:
+				return testNotebookInfo(destPath, workspace.LanguageSql), nil
+			default:
+				return nil, iofs.ErrNotExist
+			}
+		},
+		RenameFunc: func(ctx context.Context, sourcePathArg string, destinationPath string) error {
+			if sourcePathArg != sourceVisible || destinationPath != destVisible {
+				t.Fatalf("unexpected rename: %s -> %s", sourcePathArg, destinationPath)
+			}
+			renamed = true
+			return nil
+		},
+	}
+
+	root := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeDirectory,
+			Path:       "/dir",
+		}},
+	}
+
+	fs.NewNodeFS(root, &fs.Options{})
+	ctx := context.Background()
+
+	initialCheckedAt := time.Unix(123, 0)
+	fileNode := &WSNode{
+		wfClient: api,
+		fileInfo: testNotebookInfo(sourcePath, workspace.LanguagePython),
+		buf: fileBuffer{
+			Data:           []byte("# Databricks notebook source\nprint(1)\n"),
+			CachedPath:     "/tmp/stale-cache",
+			CachedChecksum: "deadbeef",
+		},
+		metadataCheckedAt: initialCheckedAt,
+	}
+	fileInode := root.NewPersistentInode(ctx, fileNode, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno(fileNode.fileInfo)})
+	root.AddChild("file.py", fileInode, false)
+
+	if errno := root.Rename(ctx, "file.py", root, "renamed.sql", 0); errno != 0 {
+		t.Fatalf("Rename failed with errno: %d", errno)
+	}
+	if len(statFreshCalls) != 2 || statFreshCalls[0] != destVisible || statFreshCalls[1] != destPath {
+		t.Fatalf("unexpected StatFresh sequence: %+v", statFreshCalls)
+	}
+	if got := fileNode.fileInfo.Path; got != destPath {
+		t.Fatalf("expected path %q after rename, got %q", destPath, got)
+	}
+	if got := fileNode.fileInfo.Language; got != workspace.LanguageSql {
+		t.Fatalf("expected SQL language after refresh fallback, got %q", got)
+	}
+	if !fileNode.metadataCheckedAt.After(initialCheckedAt) {
+		t.Fatalf("expected metadataCheckedAt to advance, got %v", fileNode.metadataCheckedAt)
+	}
+	if fileNode.buf.Data != nil {
+		t.Fatalf("expected clean buffer invalidated after refresh, got %q", string(fileNode.buf.Data))
+	}
+	if fileNode.buf.CachedPath != "" || fileNode.buf.CachedChecksum != "" {
+		t.Fatalf("expected cached file metadata cleared, got path=%q checksum=%q", fileNode.buf.CachedPath, fileNode.buf.CachedChecksum)
+	}
+}
+
+func TestRenameRefreshUnexpectedTypePreservesBufferedState(t *testing.T) {
+	const (
+		sourcePath = "/dir/file.txt"
+		destPath   = "/dir/renamed.txt"
+	)
+
+	api := &databricks.FakeWorkspaceAPI{
+		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			switch filePath {
+			case sourcePath:
+				return databricks.NewTestFileInfo(sourcePath, 5, false), nil
+			default:
+				return nil, iofs.ErrNotExist
+			}
+		},
+		StatFreshFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			if filePath != destPath {
+				return nil, iofs.ErrNotExist
+			}
+			return renameOtherFileInfo{}, nil
+		},
+		RenameFunc: func(ctx context.Context, sourcePathArg string, destinationPath string) error {
+			if sourcePathArg != sourcePath || destinationPath != destPath {
+				t.Fatalf("unexpected rename: %s -> %s", sourcePathArg, destinationPath)
+			}
+			return nil
+		},
+	}
+
+	root := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeDirectory,
+			Path:       "/dir",
+		}},
+	}
+
+	fs.NewNodeFS(root, &fs.Options{})
+	ctx := context.Background()
+
+	initialCheckedAt := time.Unix(456, 0)
+	fileNode := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       sourcePath,
+			Size:       5,
+		}},
+		buf: fileBuffer{
+			Data:       []byte("stale"),
+			CachedPath: "/tmp/stale-cache",
+		},
+		metadataCheckedAt: initialCheckedAt,
+	}
+	fileInode := root.NewPersistentInode(ctx, fileNode, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno(fileNode.fileInfo)})
+	root.AddChild("file.txt", fileInode, false)
+
+	if errno := root.Rename(ctx, "file.txt", root, "renamed.txt", 0); errno != 0 {
+		t.Fatalf("Rename failed with errno: %d", errno)
+	}
+	if got := fileNode.fileInfo.Path; got != destPath {
+		t.Fatalf("expected path %q after rename, got %q", destPath, got)
+	}
+	if got := string(fileNode.buf.Data); got != "stale" {
+		t.Fatalf("expected buffered data to remain unchanged, got %q", got)
+	}
+	if fileNode.buf.CachedPath != "/tmp/stale-cache" {
+		t.Fatalf("expected CachedPath to remain unchanged, got %q", fileNode.buf.CachedPath)
+	}
+	if !fileNode.metadataCheckedAt.Equal(initialCheckedAt) {
+		t.Fatalf("expected metadataCheckedAt to remain unchanged, got %v", fileNode.metadataCheckedAt)
+	}
+}
+
+func TestRenameRefreshFailureKeepsBufferedState(t *testing.T) {
+	const (
+		sourcePath    = "/dir/file"
+		destPath      = "/dir/renamed"
+		sourceVisible = "/dir/file.py"
+		destVisible   = "/dir/renamed.sql"
+	)
+
+	statFreshCalls := []string{}
+
+	api := &databricks.FakeWorkspaceAPI{
+		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			switch filePath {
+			case sourceVisible, sourcePath:
+				return testNotebookInfo(sourcePath, workspace.LanguagePython), nil
+			default:
+				return nil, iofs.ErrNotExist
+			}
+		},
+		StatFreshFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			statFreshCalls = append(statFreshCalls, filePath)
+			switch filePath {
+			case destVisible, destPath:
+				return nil, iofs.ErrPermission
+			default:
+				return nil, iofs.ErrNotExist
+			}
+		},
+		RenameFunc: func(ctx context.Context, sourcePathArg string, destinationPath string) error {
+			if sourcePathArg != sourceVisible || destinationPath != destVisible {
+				t.Fatalf("unexpected rename: %s -> %s", sourcePathArg, destinationPath)
+			}
+			return nil
+		},
+	}
+
+	root := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeDirectory,
+			Path:       "/dir",
+		}},
+	}
+
+	fs.NewNodeFS(root, &fs.Options{})
+	ctx := context.Background()
+
+	initialCheckedAt := time.Unix(789, 0)
+	fileNode := &WSNode{
+		wfClient: api,
+		fileInfo: testNotebookInfo(sourcePath, workspace.LanguagePython),
+		buf: fileBuffer{
+			Data:                []byte("old notebook data"),
+			CachedPath:          "/tmp/stale-cache",
+			ReplaceOnFirstWrite: true,
+		},
+		metadataCheckedAt: initialCheckedAt,
+	}
+	fileInode := root.NewPersistentInode(ctx, fileNode, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno(fileNode.fileInfo)})
+	root.AddChild("file.py", fileInode, false)
+
+	if errno := root.Rename(ctx, "file.py", root, "renamed.sql", 0); errno != 0 {
+		t.Fatalf("Rename failed with errno: %d", errno)
+	}
+	if len(statFreshCalls) != 2 || statFreshCalls[0] != destVisible || statFreshCalls[1] != destPath {
+		t.Fatalf("unexpected StatFresh sequence: %+v", statFreshCalls)
+	}
+	if got := fileNode.fileInfo.Path; got != destPath {
+		t.Fatalf("expected path %q after subtree update, got %q", destPath, got)
+	}
+	if got := string(fileNode.buf.Data); got != "old notebook data" {
+		t.Fatalf("expected buffered data to remain unchanged, got %q", got)
+	}
+	if fileNode.buf.CachedPath != "/tmp/stale-cache" {
+		t.Fatalf("expected CachedPath to remain unchanged, got %q", fileNode.buf.CachedPath)
+	}
+	if !fileNode.buf.ReplaceOnFirstWrite {
+		t.Fatal("expected ReplaceOnFirstWrite to remain unchanged")
+	}
+	if !fileNode.metadataCheckedAt.Equal(initialCheckedAt) {
+		t.Fatalf("expected metadataCheckedAt to remain unchanged, got %v", fileNode.metadataCheckedAt)
 	}
 }

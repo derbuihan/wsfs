@@ -179,27 +179,6 @@ func (entry WSDirEntry) IsNotebook() bool {
 	return entry.WSFileInfo.IsNotebook()
 }
 
-type visibleDirEntry struct {
-	name string
-	info WSFileInfo
-}
-
-func (entry visibleDirEntry) Name() string {
-	return entry.name
-}
-
-func (entry visibleDirEntry) IsDir() bool {
-	return entry.info.IsDir()
-}
-
-func (entry visibleDirEntry) Type() fs.FileMode {
-	return entry.info.Mode()
-}
-
-func (entry visibleDirEntry) Info() (fs.FileInfo, error) {
-	return entry.info, nil
-}
-
 // workspace-files
 
 type wsfsObjectInfo struct {
@@ -232,7 +211,6 @@ type workspaceClient interface {
 	Export(ctx context.Context, request workspace.ExportRequest) (*workspace.ExportResponse, error)
 	Delete(ctx context.Context, request workspace.Delete) error
 	Mkdirs(ctx context.Context, request workspace.Mkdirs) error
-	Import(ctx context.Context, request workspace.Import) error
 	Upload(ctx context.Context, path string, r io.Reader, opts ...workspace.UploadOption) error
 }
 

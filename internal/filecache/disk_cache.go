@@ -60,16 +60,21 @@ const (
 	DefaultTTL                = 7 * 24 * time.Hour
 )
 
-func DefaultCacheDir() (string, error) {
-	if base, err := os.UserCacheDir(); err == nil && base != "" {
-		return filepath.Join(base, "wsfs"), nil
+func resolveDefaultCacheDir(userCacheDir string, userCacheErr error, homeDir string, homeErr error) (string, error) {
+	if userCacheErr == nil && userCacheDir != "" {
+		return filepath.Join(userCacheDir, "wsfs"), nil
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve cache dir: %w", err)
+	if homeErr != nil {
+		return "", fmt.Errorf("resolve cache dir: %w", homeErr)
 	}
-	return filepath.Join(home, ".cache", "wsfs"), nil
+	return filepath.Join(homeDir, ".cache", "wsfs"), nil
+}
+
+func DefaultCacheDir() (string, error) {
+	userCacheDir, userCacheErr := os.UserCacheDir()
+	homeDir, homeErr := os.UserHomeDir()
+	return resolveDefaultCacheDir(userCacheDir, userCacheErr, homeDir, homeErr)
 }
 
 func NewDefaultDiskCache() (*DiskCache, error) {
@@ -404,6 +409,37 @@ func (c *DiskCache) loadExistingEntries() error {
 	return nil
 }
 
+func copyFileToLocalCache(srcPath string, localPath string, checksumFn func(string) (string, error)) (string, error) {
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to open source file: %w", err)
+	}
+	defer src.Close()
+
+	dst, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return "", fmt.Errorf("failed to create cache file: %w", err)
+	}
+
+	if _, err := io.Copy(dst, src); err != nil {
+		_ = dst.Close()
+		_ = os.Remove(localPath)
+		return "", fmt.Errorf("failed to copy file: %w", err)
+	}
+	if err := dst.Close(); err != nil {
+		_ = os.Remove(localPath)
+		return "", fmt.Errorf("failed to close cache file: %w", err)
+	}
+
+	checksum, err := checksumFn(localPath)
+	if err != nil {
+		_ = os.Remove(localPath)
+		return "", fmt.Errorf("failed to calculate checksum: %w", err)
+	}
+
+	return checksum, nil
+}
+
 // CopyToCache copies a file from srcPath to cache for remotePath
 // This is useful when we already have the data in a temp file
 func (c *DiskCache) CopyToCache(remotePath string, srcPath string, remoteModTime time.Time) (string, error) {
@@ -411,7 +447,6 @@ func (c *DiskCache) CopyToCache(remotePath string, srcPath string, remoteModTime
 		return "", fmt.Errorf("cache is disabled")
 	}
 
-	// Get file size
 	info, err := os.Stat(srcPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to stat source file: %w", err)
@@ -425,30 +460,9 @@ func (c *DiskCache) CopyToCache(remotePath string, srcPath string, remoteModTime
 
 	// Generate local path
 	localPath := c.generateLocalPath(remotePath)
-
-	// Copy file
-	src, err := os.Open(srcPath)
+	checksum, err := copyFileToLocalCache(srcPath, localPath, calculateFileChecksum)
 	if err != nil {
-		return "", fmt.Errorf("failed to open source file: %w", err)
-	}
-	defer src.Close()
-
-	dst, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		return "", fmt.Errorf("failed to create cache file: %w", err)
-	}
-	defer dst.Close()
-
-	if _, err := io.Copy(dst, src); err != nil {
-		os.Remove(localPath) // Clean up on error
-		return "", fmt.Errorf("failed to copy file: %w", err)
-	}
-
-	// Calculate checksum after copy for integrity verification
-	checksum, err := calculateFileChecksum(localPath)
-	if err != nil {
-		os.Remove(localPath) // Clean up on error
-		return "", fmt.Errorf("failed to calculate checksum: %w", err)
+		return "", err
 	}
 
 	// Add entry

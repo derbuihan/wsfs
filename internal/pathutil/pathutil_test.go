@@ -133,6 +133,65 @@ func TestNotebookSourceMarkers(t *testing.T) {
 	}
 }
 
+func TestAllNotebookSourceSuffixes(t *testing.T) {
+	got := AllNotebookSourceSuffixes()
+	want := []string{".scala", ".sql", ".py", ".R"}
+
+	if len(got) != len(want) {
+		t.Fatalf("AllNotebookSourceSuffixes() len = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("AllNotebookSourceSuffixes()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	seen := map[string]struct{}{}
+	for _, suffix := range got {
+		if _, ok := seen[suffix]; ok {
+			t.Fatalf("duplicate suffix %q in %v", suffix, got)
+		}
+		seen[suffix] = struct{}{}
+	}
+}
+
+func TestAllNotebookSourceHeadersAndCellDelimiters(t *testing.T) {
+	headers := AllNotebookSourceHeaders()
+	wantHeaders := []string{
+		"// Databricks notebook source",
+		"-- Databricks notebook source",
+		"# Databricks notebook source",
+	}
+	if len(headers) != len(wantHeaders) {
+		t.Fatalf("AllNotebookSourceHeaders() len = %d, want %d (%v)", len(headers), len(wantHeaders), headers)
+	}
+	for i := range wantHeaders {
+		if headers[i] != wantHeaders[i] {
+			t.Fatalf("AllNotebookSourceHeaders()[%d] = %q, want %q", i, headers[i], wantHeaders[i])
+		}
+	}
+
+	delimiters := AllNotebookCellDelimiters()
+	wantDelimiters := []string{
+		"// COMMAND ----------",
+		"-- COMMAND ----------",
+		"# COMMAND ----------",
+	}
+	if len(delimiters) != len(wantDelimiters) {
+		t.Fatalf("AllNotebookCellDelimiters() len = %d, want %d (%v)", len(delimiters), len(wantDelimiters), delimiters)
+	}
+	for i := range wantDelimiters {
+		if delimiters[i] != wantDelimiters[i] {
+			t.Fatalf("AllNotebookCellDelimiters()[%d] = %q, want %q", i, delimiters[i], wantDelimiters[i])
+		}
+	}
+}
+
+func TestNotebookSourceCommentPrefixUnknownLanguageFallsBackToHash(t *testing.T) {
+	if got := NotebookSourceCommentPrefix(""); got != "#" {
+		t.Fatalf("NotebookSourceCommentPrefix(unknown) = %q, want #", got)
+	}
+}
+
 func TestNotebookVisibleRoundTrip(t *testing.T) {
 	known := []struct {
 		path     string

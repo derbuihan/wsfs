@@ -465,6 +465,138 @@ func TestWriteViaNewFiles(t *testing.T) {
 	}
 }
 
+func TestWriteViaNewFilesAcceptsCreatedStatus(t *testing.T) {
+	testContent := []byte("created response is valid")
+	signedURLCalled := false
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("Expected PUT request, got %s", r.Method)
+		}
+		if r.Header.Get("X-Test-Header") != "test-value" {
+			t.Errorf("Expected custom header, got %s", r.Header.Get("X-Test-Header"))
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll body failed: %v", err)
+		}
+		if string(body) != string(testContent) {
+			t.Fatalf("unexpected PUT body: %q", string(body))
+		}
+		signedURLCalled = true
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if !strings.Contains(path, "new-files") {
+				return fmt.Errorf("unexpected path: %s", path)
+			}
+			resp := response.(*struct {
+				SignedURLs []struct {
+					URL     string            `json:"url"`
+					Headers map[string]string `json:"headers"`
+				} `json:"signed_urls"`
+			})
+			resp.SignedURLs = []struct {
+				URL     string            `json:"url"`
+				Headers map[string]string `json:"headers"`
+			}{
+				{
+					URL:     server.URL,
+					Headers: map[string]string{"X-Test-Header": "test-value"},
+				},
+			}
+			return nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, nil)
+
+	if err := client.writeViaNewFiles(context.Background(), "/test.txt", testContent); err != nil {
+		t.Fatalf("writeViaNewFiles failed: %v", err)
+	}
+	if !signedURLCalled {
+		t.Fatal("expected signed URL PUT to be called")
+	}
+}
+
+func TestWriteViaNewFilesReturnsErrorWhenNoSignedURLReturned(t *testing.T) {
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if !strings.Contains(path, "new-files") {
+				return fmt.Errorf("unexpected path: %s", path)
+			}
+			return nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, nil)
+
+	err := client.writeViaNewFiles(context.Background(), "/test.txt", []byte("payload"))
+	if err == nil {
+		t.Fatal("expected error when no signed URL is returned")
+	}
+	if !strings.Contains(err.Error(), "no signed URL returned") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestWriteViaNewFilesTruncatesPutErrorBody(t *testing.T) {
+	testContent := []byte("payload")
+	errorBody := strings.Repeat("x", maxErrorBodyLen+50)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, errorBody)
+	}))
+	defer server.Close()
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if !strings.Contains(path, "new-files") {
+				return fmt.Errorf("unexpected path: %s", path)
+			}
+			resp := response.(*struct {
+				SignedURLs []struct {
+					URL     string            `json:"url"`
+					Headers map[string]string `json:"headers"`
+				} `json:"signed_urls"`
+			})
+			resp.SignedURLs = []struct {
+				URL     string            `json:"url"`
+				Headers map[string]string `json:"headers"`
+			}{
+				{
+					URL:     server.URL,
+					Headers: map[string]string{},
+				},
+			}
+			return nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, nil)
+
+	err := client.writeViaNewFiles(context.Background(), "/test.txt", testContent)
+	if err == nil {
+		t.Fatal("expected error from failed signed URL PUT")
+	}
+	if !strings.Contains(err.Error(), "...[truncated]") {
+		t.Fatalf("expected truncated error body, got %v", err)
+	}
+	if strings.Contains(err.Error(), errorBody) {
+		t.Fatalf("expected full error body to be truncated, got %v", err)
+	}
+}
+
 // TestWriteFallbackToImportFile verifies that Write falls back to import-file for large files
 func TestWriteFallbackToImportFile(t *testing.T) {
 	// Create a large file (>= 5MB threshold) to test fallback path
@@ -501,6 +633,62 @@ func TestWriteFallbackToImportFile(t *testing.T) {
 
 	if !importFileCalled {
 		t.Error("Expected import-file fallback to be called")
+	}
+}
+
+func TestWriteFallsBackToImportFileWhenSignedURLPutFails(t *testing.T) {
+	testContent := make([]byte, 5*1024*1024)
+	for i := range testContent {
+		testContent[i] = byte(i % 251)
+	}
+
+	importFileCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, strings.Repeat("boom", 80))
+	}))
+	defer server.Close()
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			switch {
+			case strings.Contains(path, "object-info"):
+				return fs.ErrNotExist
+			case strings.Contains(path, "new-files"):
+				resp := response.(*struct {
+					SignedURLs []struct {
+						URL     string            `json:"url"`
+						Headers map[string]string `json:"headers"`
+					} `json:"signed_urls"`
+				})
+				resp.SignedURLs = []struct {
+					URL     string            `json:"url"`
+					Headers map[string]string `json:"headers"`
+				}{
+					{
+						URL:     server.URL,
+						Headers: map[string]string{},
+					},
+				}
+				return nil
+			case strings.Contains(path, "import-file"):
+				importFileCalled = true
+				return nil
+			default:
+				return fmt.Errorf("unexpected path: %s", path)
+			}
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, metacache.NewCache(1*time.Second))
+
+	if err := client.Write(context.Background(), "/test.txt", testContent); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if !importFileCalled {
+		t.Fatal("expected import-file fallback after signed URL PUT failure")
 	}
 }
 
@@ -670,6 +858,170 @@ func TestReadDirCachesEntriesForStatAndNegativeLookup(t *testing.T) {
 	}
 	if objectInfoCalls != 0 {
 		t.Fatalf("expected no object-info calls, got %d", objectInfoCalls)
+	}
+}
+
+func TestReadDirCachesNotebookSourceAliasLookup(t *testing.T) {
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if !strings.Contains(path, "list-files") {
+				return fmt.Errorf("unexpected path: %s", path)
+			}
+			resp := response.(*listFilesResponse)
+			resp.Objects = []wsfsObjectInfo{
+				{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/notebook",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				},
+			}
+			return nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, metacache.NewCacheWithTTLs(10*time.Second, 3*time.Second))
+
+	if _, err := client.ReadDir(context.Background(), "/test"); err != nil {
+		t.Fatalf("ReadDir failed: %v", err)
+	}
+
+	info, found := client.cache.LookupDirEntry("/test/notebook.py")
+	if !found || info == nil {
+		t.Fatal("expected notebook source alias to be cached")
+	}
+	wsInfo, ok := info.(WSFileInfo)
+	if !ok {
+		t.Fatalf("expected WSFileInfo, got %T", info)
+	}
+	if !wsInfo.IsNotebook() || wsInfo.Path != "/test/notebook" {
+		t.Fatalf("unexpected notebook alias lookup result: %+v", wsInfo)
+	}
+}
+
+func TestReadDirCachesNotebookFallbackAliasOnSourceCollision(t *testing.T) {
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if !strings.Contains(path, "list-files") {
+				return fmt.Errorf("unexpected path: %s", path)
+			}
+			resp := response.(*listFilesResponse)
+			resp.Objects = []wsfsObjectInfo{
+				{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/notebook",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				},
+				{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/notebook.py",
+						ObjectType: workspace.ObjectTypeFile,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				},
+			}
+			return nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, metacache.NewCacheWithTTLs(10*time.Second, 3*time.Second))
+
+	if _, err := client.ReadDir(context.Background(), "/test"); err != nil {
+		t.Fatalf("ReadDir failed: %v", err)
+	}
+
+	sourceInfo, found := client.cache.LookupDirEntry("/test/notebook.py")
+	if !found || sourceInfo == nil {
+		t.Fatal("expected exact source-path collision entry to be cached")
+	}
+	sourceWSInfo, ok := sourceInfo.(WSFileInfo)
+	if !ok {
+		t.Fatalf("expected WSFileInfo, got %T", sourceInfo)
+	}
+	if sourceWSInfo.IsNotebook() || sourceWSInfo.Path != "/test/notebook.py" {
+		t.Fatalf("expected exact file for .py path, got %+v", sourceWSInfo)
+	}
+
+	fallbackInfo, found := client.cache.LookupDirEntry("/test/notebook.ipynb")
+	if !found || fallbackInfo == nil {
+		t.Fatal("expected fallback alias to be cached")
+	}
+	fallbackWSInfo, ok := fallbackInfo.(WSFileInfo)
+	if !ok {
+		t.Fatalf("expected WSFileInfo, got %T", fallbackInfo)
+	}
+	if !fallbackWSInfo.IsNotebook() || fallbackWSInfo.Path != "/test/notebook" {
+		t.Fatalf("expected notebook fallback alias, got %+v", fallbackWSInfo)
+	}
+}
+
+func TestReadDirHidesNotebookWhenPreferredAndFallbackCollide(t *testing.T) {
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			if !strings.Contains(path, "list-files") {
+				return fmt.Errorf("unexpected path: %s", path)
+			}
+			resp := response.(*listFilesResponse)
+			resp.Objects = []wsfsObjectInfo{
+				{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/notebook",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				},
+				{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/notebook.py",
+						ObjectType: workspace.ObjectTypeFile,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				},
+				{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/notebook.ipynb",
+						ObjectType: workspace.ObjectTypeFile,
+						ModifiedAt: time.Now().UnixMilli(),
+					},
+				},
+			}
+			return nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, metacache.NewCacheWithTTLs(10*time.Second, 3*time.Second))
+
+	if _, err := client.ReadDir(context.Background(), "/test"); err != nil {
+		t.Fatalf("ReadDir failed: %v", err)
+	}
+
+	for _, path := range []string{"/test/notebook.py", "/test/notebook.ipynb"} {
+		info, found := client.cache.LookupDirEntry(path)
+		if !found || info == nil {
+			t.Fatalf("expected exact entry for %s", path)
+		}
+		wsInfo, ok := info.(WSFileInfo)
+		if !ok {
+			t.Fatalf("expected WSFileInfo, got %T", info)
+		}
+		if wsInfo.IsNotebook() {
+			t.Fatalf("expected exact non-notebook entry for %s, got %+v", path, wsInfo)
+		}
+		if wsInfo.Path != path {
+			t.Fatalf("expected exact path %s, got %s", path, wsInfo.Path)
+		}
 	}
 }
 
@@ -1803,6 +2155,177 @@ func TestStatFreshPreservesExactNotebookSize(t *testing.T) {
 	}
 }
 
+func TestStatFreshNotebookSourceAliasPreservesExactSize(t *testing.T) {
+	notebookContent := "# Databricks notebook source\nprint('source alias')\n"
+	modifiedAt := time.Now().UnixMilli()
+	exportCalls := 0
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			switch {
+			case strings.Contains(path, "object-info?path=%2Ftest%2Fnote.py"):
+				return fs.ErrNotExist
+			case strings.Contains(path, "object-info?path=%2Ftest%2Fnote"):
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/note",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						Size:       1,
+						ModifiedAt: modifiedAt,
+					},
+				}
+				return nil
+			default:
+				return fmt.Errorf("unexpected path: %s", path)
+			}
+		},
+	}
+
+	mockWorkspace := &MockWorkspaceClient{
+		ExportFunc: func(ctx context.Context, req workspace.ExportRequest) (*workspace.ExportResponse, error) {
+			exportCalls++
+			return &workspace.ExportResponse{
+				Content: base64.StdEncoding.EncodeToString([]byte(notebookContent)),
+			}, nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, nil)
+
+	if _, err := client.ReadAll(context.Background(), "/test/note.py"); err != nil {
+		t.Fatalf("ReadAll failed: %v", err)
+	}
+
+	info, err := client.StatFresh(context.Background(), "/test/note.py")
+	if err != nil {
+		t.Fatalf("StatFresh failed: %v", err)
+	}
+	wsInfo := info.(WSFileInfo)
+	if wsInfo.Size() != int64(len(notebookContent)) {
+		t.Fatalf("expected exact size %d, got %d", len(notebookContent), wsInfo.Size())
+	}
+	if !wsInfo.NotebookSizeComputed {
+		t.Fatal("expected exact notebook size to remain computed")
+	}
+	if exportCalls != 1 {
+		t.Fatalf("did not expect StatFresh to export notebook again, got %d total exports", exportCalls)
+	}
+}
+
+func TestStatFreshNotebookFallbackAliasPreservesExactSizeWhenSourceVisibleCollides(t *testing.T) {
+	notebookContent := "# Databricks notebook source\nprint('fallback alias')\n"
+	modifiedAt := time.Now().UnixMilli()
+	exportCalls := 0
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			switch {
+			case strings.Contains(path, "object-info?path=%2Ftest%2Fnote.ipynb"):
+				return fs.ErrNotExist
+			case strings.Contains(path, "object-info?path=%2Ftest%2Fnote.py"):
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/note.py",
+						ObjectType: workspace.ObjectTypeFile,
+						ModifiedAt: modifiedAt,
+					},
+				}
+				return nil
+			case strings.Contains(path, "object-info?path=%2Ftest%2Fnote"):
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/note",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						Size:       1,
+						ModifiedAt: modifiedAt,
+					},
+				}
+				return nil
+			default:
+				return fmt.Errorf("unexpected path: %s", path)
+			}
+		},
+	}
+
+	mockWorkspace := &MockWorkspaceClient{
+		ExportFunc: func(ctx context.Context, req workspace.ExportRequest) (*workspace.ExportResponse, error) {
+			exportCalls++
+			return &workspace.ExportResponse{
+				Content: base64.StdEncoding.EncodeToString([]byte(notebookContent)),
+			}, nil
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(mockWorkspace, mockAPI, nil)
+
+	if _, err := client.ReadAll(context.Background(), "/test/note"); err != nil {
+		t.Fatalf("ReadAll failed: %v", err)
+	}
+
+	info, err := client.StatFresh(context.Background(), "/test/note.ipynb")
+	if err != nil {
+		t.Fatalf("StatFresh failed: %v", err)
+	}
+	wsInfo := info.(WSFileInfo)
+	if wsInfo.Path != "/test/note" {
+		t.Fatalf("expected notebook path /test/note, got %s", wsInfo.Path)
+	}
+	if wsInfo.Size() != int64(len(notebookContent)) {
+		t.Fatalf("expected exact size %d, got %d", len(notebookContent), wsInfo.Size())
+	}
+	if !wsInfo.NotebookSizeComputed {
+		t.Fatal("expected exact notebook size to remain computed")
+	}
+	if exportCalls != 1 {
+		t.Fatalf("did not expect StatFresh to export notebook again, got %d total exports", exportCalls)
+	}
+}
+
+func TestStatFreshNotebookFallbackAliasHiddenWithoutCollision(t *testing.T) {
+	modifiedAt := time.Now().UnixMilli()
+
+	mockAPI := &MockAPIClient{
+		DoFunc: func(ctx context.Context, method, path string,
+			headers map[string]string, queryParams map[string]any, request, response any,
+			visitors ...func(*http.Request) error) error {
+			switch {
+			case strings.Contains(path, "object-info?path=%2Ftest%2Fplain.ipynb"):
+				return fs.ErrNotExist
+			case strings.Contains(path, "object-info?path=%2Ftest%2Fplain.py"):
+				return fs.ErrNotExist
+			case strings.Contains(path, "object-info?path=%2Ftest%2Fplain"):
+				resp := response.(*objectInfoResponse)
+				resp.WsfsObjectInfo = wsfsObjectInfo{
+					ObjectInfo: workspace.ObjectInfo{
+						Path:       "/test/plain",
+						ObjectType: workspace.ObjectTypeNotebook,
+						Language:   workspace.LanguagePython,
+						ModifiedAt: modifiedAt,
+					},
+				}
+				return nil
+			default:
+				return fmt.Errorf("unexpected path: %s", path)
+			}
+		},
+	}
+
+	client := NewWorkspaceFilesClientWithDeps(&MockWorkspaceClient{}, mockAPI, nil)
+
+	if _, err := client.StatFresh(context.Background(), "/test/plain.ipynb"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("expected fallback alias to stay hidden without collision, got %v", err)
+	}
+}
+
 func TestStatPreservesExactNotebookSizeAfterCacheExpiry(t *testing.T) {
 	notebookContent := "# Databricks notebook source\nprint('sticky')\n"
 	modifiedAt := time.Now().UnixMilli()
@@ -2428,6 +2951,84 @@ func TestRenameNotebookInvalidDestinationReturnsErrInvalid(t *testing.T) {
 	err := client.Rename(context.Background(), "/test/old.py", "/test/new.txt")
 	if !errors.Is(err, fs.ErrInvalid) {
 		t.Fatalf("expected fs.ErrInvalid, got %v", err)
+	}
+}
+
+func TestDetectNotebookLanguageFromSource(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+		want workspace.Language
+	}{
+		{
+			name: "sql",
+			data: []byte("-- Databricks notebook source\nSELECT 1\n"),
+			want: workspace.LanguageSql,
+		},
+		{
+			name: "scala",
+			data: []byte("// Databricks notebook source\nprintln(1)\n"),
+			want: workspace.LanguageScala,
+		},
+		{
+			name: "python",
+			data: []byte("# Databricks notebook source\nprint(1)\n"),
+			want: workspace.LanguagePython,
+		},
+		{
+			name: "crlf first line",
+			data: []byte("-- Databricks notebook source\r\nSELECT 1\r\n"),
+			want: workspace.LanguageSql,
+		},
+		{
+			name: "unknown",
+			data: []byte("plain text\n"),
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := detectNotebookLanguageFromSource(tt.data); got != tt.want {
+				t.Fatalf("detectNotebookLanguageFromSource(%q) = %q, want %q", string(tt.data), got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeNotebookLanguage(t *testing.T) {
+	tests := []struct {
+		name     string
+		language workspace.Language
+		data     []byte
+		want     workspace.Language
+	}{
+		{
+			name:     "keeps explicit language",
+			language: workspace.LanguageR,
+			data:     []byte("# Databricks notebook source\nprint(1)\n"),
+			want:     workspace.LanguageR,
+		},
+		{
+			name:     "detects language from source",
+			language: "",
+			data:     []byte("// Databricks notebook source\nprintln(1)\n"),
+			want:     workspace.LanguageScala,
+		},
+		{
+			name:     "defaults to python when unknown",
+			language: "",
+			data:     []byte("plain text\n"),
+			want:     workspace.LanguagePython,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeNotebookLanguage(tt.language, tt.data); got != tt.want {
+				t.Fatalf("normalizeNotebookLanguage(%q, %q) = %q, want %q", tt.language, string(tt.data), got, tt.want)
+			}
+		})
 	}
 }
 

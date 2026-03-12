@@ -1799,6 +1799,76 @@ func TestWriteFallsBackToRemoteWhenCacheChecksumMismatch(t *testing.T) {
 	}
 }
 
+func TestWriteLoadsValidCacheFileForMutation(t *testing.T) {
+	cacheFile := t.TempDir() + "/cache"
+	if err := os.WriteFile(cacheFile, []byte("cached-data"), 0600); err != nil {
+		t.Fatalf("write cache file: %v", err)
+	}
+
+	n := &WSNode{
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+			Size:       11,
+		}},
+		buf: fileBuffer{
+			CachedPath:     cacheFile,
+			CachedChecksum: filecache.CalculateChecksum([]byte("cached-data")),
+			FileSize:       11,
+		},
+	}
+
+	if written, errno := n.Write(context.Background(), nil, []byte("X"), 6); errno != 0 {
+		t.Fatalf("Write failed: %d", errno)
+	} else if written != 1 {
+		t.Fatalf("expected 1 written byte, got %d", written)
+	}
+	if got := string(n.buf.Data); got != "cachedXdata" {
+		t.Fatalf("unexpected buffer after write: %q", got)
+	}
+	if !n.buf.Dirty {
+		t.Fatal("expected buffer to be dirty after write")
+	}
+}
+
+func TestWriteFallsBackToRemoteWhenCacheFileMissing(t *testing.T) {
+	readAllCalls := 0
+	api := &databricks.FakeWorkspaceAPI{
+		ReadAllFunc: func(ctx context.Context, filePath string) ([]byte, error) {
+			readAllCalls++
+			return []byte("remote"), nil
+		},
+	}
+
+	n := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       "/test.txt",
+			Size:       6,
+		}},
+		buf: fileBuffer{
+			CachedPath: t.TempDir() + "/missing",
+			FileSize:   6,
+		},
+	}
+
+	if written, errno := n.Write(context.Background(), nil, []byte("X"), 0); errno != 0 {
+		t.Fatalf("Write failed: %d", errno)
+	} else if written != 1 {
+		t.Fatalf("expected 1 written byte, got %d", written)
+	}
+	if readAllCalls != 1 {
+		t.Fatalf("expected one remote reload after cache miss, got %d", readAllCalls)
+	}
+	if got := string(n.buf.Data); got != "Xemote" {
+		t.Fatalf("unexpected buffer after write: %q", got)
+	}
+	if n.buf.CachedPath != "" || n.buf.CachedChecksum != "" {
+		t.Fatalf("expected cached file metadata cleared, got path=%q checksum=%q", n.buf.CachedPath, n.buf.CachedChecksum)
+	}
+}
+
 // ============================================================================
 // Notebook Source Display Tests
 // ============================================================================

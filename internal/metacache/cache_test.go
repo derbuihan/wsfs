@@ -359,6 +359,114 @@ func TestCacheDirEntriesLookup(t *testing.T) {
 	}
 }
 
+func TestNewCacheWithConfigDefaultsAndPositiveTTL(t *testing.T) {
+	c := NewCacheWithConfig(0, 0, 0)
+
+	if got := c.PositiveTTL(); got != time.Second {
+		t.Fatalf("PositiveTTL() = %v, want 1s", got)
+	}
+	if c.negativeTTL != time.Second {
+		t.Fatalf("negativeTTL = %v, want 1s", c.negativeTTL)
+	}
+	if c.maxEntries != defaultMaxEntries {
+		t.Fatalf("maxEntries = %d, want %d", c.maxEntries, defaultMaxEntries)
+	}
+}
+
+func TestCacheDirEntriesCloneIndependenceAndExpiry(t *testing.T) {
+	c := NewCacheWithTTLs(50*time.Millisecond, 25*time.Millisecond)
+	info := newMockFileInfo("file.txt", 10, false)
+
+	c.SetDirEntries(
+		"/dir",
+		[]fs.DirEntry{mockDirEntry{name: "file.txt", info: info}},
+		[]DirLookupEntry{{Name: "file.txt", Info: info}},
+	)
+
+	entries, found := c.GetDirEntries("/dir")
+	if !found || len(entries) != 1 {
+		t.Fatalf("expected cached directory entry, got found=%v entries=%v", found, entries)
+	}
+
+	entries[0] = mockDirEntry{name: "changed.txt", info: newMockFileInfo("changed.txt", 1, false)}
+
+	refetched, found := c.GetDirEntries("/dir")
+	if !found || len(refetched) != 1 {
+		t.Fatalf("expected refetched directory entry, got found=%v entries=%v", found, refetched)
+	}
+	if refetched[0].Name() != "file.txt" {
+		t.Fatalf("expected cloned entries to remain unchanged, got %q", refetched[0].Name())
+	}
+
+	time.Sleep(80 * time.Millisecond)
+
+	if _, found := c.GetDirEntries("/dir"); found {
+		t.Fatal("expected directory entries to expire")
+	}
+	if _, found := c.LookupDirEntry(filepath.Join("/dir", "file.txt")); found {
+		t.Fatal("expected directory lookup to miss after expiry")
+	}
+}
+
+func TestCacheInvalidateSubtree(t *testing.T) {
+	c := NewCache(10 * time.Second)
+
+	parentInfo := newMockFileInfo("child", 0, true)
+	fileInfo := newMockFileInfo("file.txt", 1, false)
+	otherInfo := newMockFileInfo("other.txt", 2, false)
+
+	c.Set("/dir/child", parentInfo)
+	c.Set("/dir/child/file.txt", fileInfo)
+	c.Set("/dir/child/grand/file2.txt", fileInfo)
+	c.Set("/other.txt", otherInfo)
+	c.SetDirEntries("/dir", []fs.DirEntry{mockDirEntry{name: "child", info: parentInfo}}, []DirLookupEntry{{Name: "child", Info: parentInfo}})
+	c.SetDirEntries("/dir/child", []fs.DirEntry{mockDirEntry{name: "file.txt", info: fileInfo}}, []DirLookupEntry{{Name: "file.txt", Info: fileInfo}})
+	c.SetDirEntries("/dir/child/grand", []fs.DirEntry{mockDirEntry{name: "file2.txt", info: fileInfo}}, []DirLookupEntry{{Name: "file2.txt", Info: fileInfo}})
+
+	c.Invalidate("/dir/child")
+
+	for _, path := range []string{"/dir/child", "/dir/child/file.txt", "/dir/child/grand/file2.txt"} {
+		if _, found := c.Get(path); found {
+			t.Fatalf("expected %s to be invalidated", path)
+		}
+	}
+	for _, dirPath := range []string{"/dir", "/dir/child", "/dir/child/grand"} {
+		if _, found := c.GetDirEntries(dirPath); found {
+			t.Fatalf("expected dir cache %s to be invalidated", dirPath)
+		}
+	}
+	if _, found := c.Get("/other.txt"); !found {
+		t.Fatal("expected unrelated entry to remain")
+	}
+}
+
+func TestCacheInvalidateRootClearsAllEntries(t *testing.T) {
+	c := NewCache(10 * time.Second)
+
+	rootInfo := newMockFileInfo("root.txt", 1, false)
+	dirInfo := newMockFileInfo("dir", 0, true)
+	childInfo := newMockFileInfo("child.txt", 2, false)
+
+	c.Set("/root.txt", rootInfo)
+	c.Set("/dir", dirInfo)
+	c.Set("/dir/child.txt", childInfo)
+	c.SetDirEntries("/", []fs.DirEntry{mockDirEntry{name: "root.txt", info: rootInfo}, mockDirEntry{name: "dir", info: dirInfo}}, []DirLookupEntry{{Name: "root.txt", Info: rootInfo}, {Name: "dir", Info: dirInfo}})
+	c.SetDirEntries("/dir", []fs.DirEntry{mockDirEntry{name: "child.txt", info: childInfo}}, []DirLookupEntry{{Name: "child.txt", Info: childInfo}})
+
+	c.Invalidate("/")
+
+	for _, path := range []string{"/root.txt", "/dir", "/dir/child.txt"} {
+		if _, found := c.Get(path); found {
+			t.Fatalf("expected %s to be invalidated by root invalidation", path)
+		}
+	}
+	for _, dirPath := range []string{"/", "/dir"} {
+		if _, found := c.GetDirEntries(dirPath); found {
+			t.Fatalf("expected dir cache %s to be invalidated by root invalidation", dirPath)
+		}
+	}
+}
+
 func TestCacheNegativeTTL(t *testing.T) {
 	c := NewCacheWithTTLs(10*time.Second, 50*time.Millisecond)
 	c.Set("/missing.txt", nil)

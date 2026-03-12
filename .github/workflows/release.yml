@@ -15,6 +15,9 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    env:
+      DATABRICKS_HOST: ""
+      DATABRICKS_TOKEN: ""
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
