@@ -540,3 +540,173 @@ func TestRenameRegularFileFlushFailureStopsRename(t *testing.T) {
 		t.Fatalf("expected source path to remain unchanged, got %q", got)
 	}
 }
+
+func TestRenameRegularFileOverwriteInvalidatesDestinationNode(t *testing.T) {
+	const (
+		sourcePath = "/dir/index.lock"
+		destPath   = "/dir/index"
+		oldData    = "old index data\n"
+		newData    = "new index data\n"
+	)
+
+	renamed := false
+	remoteContents := map[string][]byte{
+		sourcePath: []byte(newData),
+		destPath:   []byte(oldData),
+	}
+
+	api := &databricks.FakeWorkspaceAPI{
+		ReadAllFunc: func(ctx context.Context, filepath string) ([]byte, error) {
+			data, ok := remoteContents[filepath]
+			if !ok {
+				return nil, iofs.ErrNotExist
+			}
+			return append([]byte(nil), data...), nil
+		},
+		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			switch filePath {
+			case sourcePath:
+				if renamed {
+					return nil, iofs.ErrNotExist
+				}
+				return databricks.NewTestFileInfo(sourcePath, int64(len(newData)), false), nil
+			case destPath:
+				return databricks.NewTestFileInfo(destPath, int64(len(remoteContents[destPath])), false), nil
+			default:
+				return nil, iofs.ErrNotExist
+			}
+		},
+		RenameFunc: func(ctx context.Context, sourcePathArg string, destinationPath string) error {
+			if sourcePathArg != sourcePath || destinationPath != destPath {
+				t.Fatalf("unexpected rename: %s -> %s", sourcePathArg, destinationPath)
+			}
+			renamed = true
+			remoteContents[destPath] = append([]byte(nil), remoteContents[sourcePath]...)
+			delete(remoteContents, sourcePath)
+			return nil
+		},
+	}
+
+	root := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeDirectory,
+			Path:       "/dir",
+		}},
+	}
+
+	fs.NewNodeFS(root, &fs.Options{})
+	ctx := context.Background()
+
+	sourceNode := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       sourcePath,
+			Size:       int64(len(newData)),
+		}},
+	}
+	sourceInode := root.NewPersistentInode(ctx, sourceNode, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno(sourceNode.fileInfo)})
+	root.AddChild("index.lock", sourceInode, false)
+
+	destNode := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       destPath,
+			Size:       int64(len(oldData)),
+		}},
+		buf: fileBuffer{Data: []byte(oldData)},
+	}
+	destInode := root.NewPersistentInode(ctx, destNode, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno(destNode.fileInfo)})
+	root.AddChild("index", destInode, false)
+
+	if errno := root.Rename(ctx, "index.lock", root, "index", 0); errno != 0 {
+		t.Fatalf("Rename failed with errno: %d", errno)
+	}
+
+	if destNode.buf.Data != nil {
+		t.Fatalf("expected overwritten destination buffer cleared, got %q", string(destNode.buf.Data))
+	}
+	if destNode.buf.CachedPath != "" || destNode.buf.CachedChecksum != "" {
+		t.Fatalf("expected overwritten destination cache metadata cleared, got path=%q checksum=%q", destNode.buf.CachedPath, destNode.buf.CachedChecksum)
+	}
+	if got := readNodeText(t, destNode); got != newData {
+		t.Fatalf("expected overwritten destination to refetch new data, got %q", got)
+	}
+}
+
+func TestRenameRegularFileOverwriteDirtyDestinationStopsRename(t *testing.T) {
+	const (
+		sourcePath = "/dir/index.lock"
+		destPath   = "/dir/index"
+	)
+
+	renameCalled := false
+
+	api := &databricks.FakeWorkspaceAPI{
+		StatFunc: func(ctx context.Context, filePath string) (iofs.FileInfo, error) {
+			switch filePath {
+			case sourcePath:
+				return databricks.NewTestFileInfo(sourcePath, 4, false), nil
+			case destPath:
+				return databricks.NewTestFileInfo(destPath, 5, false), nil
+			default:
+				return nil, iofs.ErrNotExist
+			}
+		},
+		RenameFunc: func(ctx context.Context, sourcePathArg string, destinationPath string) error {
+			renameCalled = true
+			return nil
+		},
+	}
+
+	root := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeDirectory,
+			Path:       "/dir",
+		}},
+	}
+
+	fs.NewNodeFS(root, &fs.Options{})
+	ctx := context.Background()
+
+	sourceNode := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       sourcePath,
+			Size:       4,
+		}},
+	}
+	sourceInode := root.NewPersistentInode(ctx, sourceNode, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno(sourceNode.fileInfo)})
+	root.AddChild("index.lock", sourceInode, false)
+
+	destNode := &WSNode{
+		wfClient: api,
+		fileInfo: databricks.WSFileInfo{ObjectInfo: workspace.ObjectInfo{
+			ObjectType: workspace.ObjectTypeFile,
+			Path:       destPath,
+			Size:       5,
+		}},
+		buf:       fileBuffer{Data: []byte("dirty")},
+		openCount: 1,
+	}
+	destNode.markDirtyLocked(dirtyData)
+	destInode := root.NewPersistentInode(ctx, destNode, fs.StableAttr{Mode: syscall.S_IFREG, Ino: stableIno(destNode.fileInfo)})
+	root.AddChild("index", destInode, false)
+
+	if errno := root.Rename(ctx, "index.lock", root, "index", 0); errno != syscall.EBUSY {
+		t.Fatalf("expected EBUSY, got %d", errno)
+	}
+	if renameCalled {
+		t.Fatal("expected rename to stop before remote rename call")
+	}
+	if !destNode.isDirtyLocked() {
+		t.Fatal("expected destination node to remain dirty after aborted overwrite")
+	}
+	if got := sourceNode.fileInfo.Path; got != sourcePath {
+		t.Fatalf("expected source path to remain unchanged, got %q", got)
+	}
+}

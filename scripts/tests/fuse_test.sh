@@ -227,18 +227,38 @@ assert "[ $CHOWN_RC -ne 0 ]" "chown returns error (not supported)"
 if command -v git >/dev/null 2>&1; then
   run_cmd 'mkdir gitrepo'
   assert_exit_code 0 '(cd gitrepo && git init)' "git init succeeds on wsfs"
+  assert_file_exists "gitrepo/.git/HEAD" "git init creates .git/HEAD"
   assert_file_exists "gitrepo/.git/config" "git init creates .git/config"
+  assert_dir_exists "gitrepo/.git/objects" "git init creates .git/objects"
+  assert_dir_exists "gitrepo/.git/refs" "git init creates .git/refs"
+  assert_dir_exists "gitrepo/.git/hooks" "git init creates .git/hooks"
   assert_exit_code 0 '(cd gitrepo && git config user.name "wsfs-test" && git config user.email "wsfs-test@example.com")' "git local user config succeeds"
   run_cmd 'printf "# Databricks notebook source\nprint(1)\n" > gitrepo/notebook.py'
   run_cmd 'printf "hello\n" > gitrepo/regular.txt'
+  EXPECTED_NOTEBOOK_INITIAL_SIZE=$(printf '# Databricks notebook source\nprint(1)\n' | wc -c | tr -d ' ')
+  NOTEBOOK_STAT_SIZE=$(stat_size gitrepo/notebook.py)
+  assert_eq "$EXPECTED_NOTEBOOK_INITIAL_SIZE" "$NOTEBOOK_STAT_SIZE" "notebook source stat size matches full source bytes before git add"
   GIT_STATUS=$(cd gitrepo && git status --short)
   assert_contains "$GIT_STATUS" "?? notebook.py" "git status shows untracked notebook source"
   assert_contains "$GIT_STATUS" "?? regular.txt" "git status shows untracked regular file"
   assert_exit_code 0 '(cd gitrepo && git add .)' "git add succeeds on wsfs"
+  assert_file_exists "gitrepo/.git/index" "git add creates .git/index"
+  assert_not_exists "gitrepo/.git/index.lock" "git add cleans up .git/index.lock"
   assert_exit_code 0 '(cd gitrepo && git commit -m "initial commit")' "git commit succeeds on wsfs"
+  GIT_BRANCH=$(cd gitrepo && git symbolic-ref --quiet --short HEAD)
+  assert "[ -n \"$GIT_BRANCH\" ]" "git reports the current branch after commit"
+  assert_file_exists "gitrepo/.git/refs/heads/$GIT_BRANCH" "git commit creates branch ref"
+  assert_file_exists "gitrepo/.git/logs/HEAD" "git commit creates HEAD reflog"
+  assert_file_exists "gitrepo/.git/logs/refs/heads/$GIT_BRANCH" "git commit creates branch reflog"
+  assert_not_exists "gitrepo/.git/refs/heads/${GIT_BRANCH}.lock" "git commit cleans up branch lockfile"
+  GIT_NOTEBOOK_SIZE=$(cd gitrepo && git cat-file -s HEAD:notebook.py)
+  assert_eq "$EXPECTED_NOTEBOOK_INITIAL_SIZE" "$GIT_NOTEBOOK_SIZE" "git initial commit stores full notebook source bytes"
   GIT_STATUS=$(cd gitrepo && git status --short)
   assert_eq "" "$GIT_STATUS" "git status is clean after commit"
   run_cmd 'printf "# Databricks notebook source\nprint(2)\n" > gitrepo/notebook.py'
+  EXPECTED_NOTEBOOK_UPDATED_SIZE=$(printf '# Databricks notebook source\nprint(2)\n' | wc -c | tr -d ' ')
+  NOTEBOOK_STAT_SIZE=$(stat_size gitrepo/notebook.py)
+  assert_eq "$EXPECTED_NOTEBOOK_UPDATED_SIZE" "$NOTEBOOK_STAT_SIZE" "modified notebook source stat size matches full source bytes"
   GIT_STATUS=$(cd gitrepo && git status --short)
   assert_contains "$GIT_STATUS" "M notebook.py" "git status shows tracked notebook modification"
   assert_exit_code 0 '(cd gitrepo && git rev-parse --is-inside-work-tree)' "git repo is usable after init"
@@ -248,11 +268,21 @@ if command -v git >/dev/null 2>&1; then
   assert_eq "initial commit" "$GIT_SUBJECT" "git log returns the latest commit subject"
 
   assert_exit_code 0 '(cd gitrepo && git add notebook.py && git commit -m "notebook update")' "git commit succeeds after notebook modification"
+  GIT_NOTEBOOK_SIZE=$(cd gitrepo && git cat-file -s HEAD:notebook.py)
+  assert_eq "$EXPECTED_NOTEBOOK_UPDATED_SIZE" "$GIT_NOTEBOOK_SIZE" "git notebook update commit stores full notebook source bytes"
+  GIT_STATUS=$(cd gitrepo && git status --short)
+  assert_eq "" "$GIT_STATUS" "notebook source is clean immediately after notebook update commit"
+  run_cmd 'printf "hello again\n" > gitrepo/regular.txt'
+  GIT_STATUS=$(cd gitrepo && git status --short)
+  assert_contains "$GIT_STATUS" "M regular.txt" "git status shows tracked regular file modification"
+  assert_exit_code 0 '(cd gitrepo && git add regular.txt && git commit -m "regular update")' "git commit succeeds after regular file modification"
   run_cmd 'printf "print(\"plain\")\n" > gitrepo/script.py'
   assert_exit_code 0 '(cd gitrepo && git add script.py && git commit -m "plain script commit")' "git commit succeeds for plain .py file"
   GIT_STATUS=$(cd gitrepo && git status --short)
   assert_eq "" "$GIT_STATUS" "plain .py file is clean immediately after commit"
   sleep 11
+  NOTEBOOK_STAT_SIZE=$(stat_size gitrepo/notebook.py)
+  assert_eq "$EXPECTED_NOTEBOOK_UPDATED_SIZE" "$NOTEBOOK_STAT_SIZE" "tracked notebook stat size stays exact after TTL expiry"
   GIT_STATUS=$(cd gitrepo && git status --short)
   assert_eq "" "$GIT_STATUS" "plain .py file stays clean after TTL expiry"
   set +e

@@ -218,6 +218,7 @@ Recommended `.vscode/settings.json` for wsfs-backed workspaces:
 
 ### Git-Heavy Workloads
 
+- Direct `.git` on wsfs is correctness-supported for `git init`, `git status`, `git add`, and `git commit`, including follow-up commits against notebook source files and regular files.
 - Prefer a local separate git dir so the worktree stays on wsfs but `.git` lives on a local filesystem.
 - A plain Git command is enough:
 
@@ -227,7 +228,7 @@ git -C /mnt/wsfs/path/to/repo init --separate-git-dir ~/.local/state/wsfs/gitdir
 
 - The same command works for an already-initialized repository and rewrites `.git` into a gitfile that points at the local git dir.
 - Use `scripts/tests/git_diagnostic.sh` to measure cold/warm `git status`, post-TTL `git status`, `git rev-parse`, and `git log` against a mounted repo.
-- As stopgaps, Git's `untracked-cache` and `fsmonitor` can help `status`-style commands, but the biggest wins come from wsfs metadata-path tuning or a local git dir.
+- As stopgaps, Git's `untracked-cache` and `fsmonitor` can help `status`-style commands, but the biggest wins still come from wsfs metadata-path tuning or a local git dir.
 
 ### Cache Monitoring
 

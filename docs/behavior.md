@@ -65,6 +65,7 @@ This behavior is designed to keep search/indexing throughput reasonable for VSCo
 
 ## Git-heavy workloads
 
+- Direct `.git` on wsfs is correctness-supported for `git init`, `git status`, `git add`, and `git commit`.
 - Prefer a local separate git dir so `.git` lives on a local filesystem while the working tree remains on wsfs.
 - `scripts/tests/git_diagnostic.sh` is the quick way to compare cold/warm metadata timings on a mounted repo.
 - Git's `untracked-cache` and `fsmonitor` can help as temporary mitigations, but they do not replace wsfs-side metadata optimizations.

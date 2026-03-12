@@ -75,6 +75,11 @@
 - [x] Git 安定化 1-4（notebook exact size の永続化、flush 後 exact size 保持、new regular file first-write fast path、regular flush の local metadata 化、Git 回帰テスト追加）
 - [x] cold notebook の `stat/read` size 不整合を修正（metadata path で exact size を materialize、`Getattr`/`Lookup`/read-only `Open` の回帰テスト追加、docs 更新）
 
+## 完了（2026-03-12）
+
+- [x] direct `.git` 互換を強化（rename-overwrite の destination stale/dirty 保護、Git smoke を init/status/add/commit artifact まで拡張、docs 更新）
+- [x] Git smoke に notebook size 回帰を追加（source notebook の `stat` size / Git object size / TTL 後整合を確認）
+
 ---
 
 ## 未対応（オプション）

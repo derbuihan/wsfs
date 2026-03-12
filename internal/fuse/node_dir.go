@@ -110,6 +110,47 @@ func flushRenameChildIfDirty(ctx context.Context, inode *fs.Inode) syscall.Errno
 	return node.flushLocked(ctx)
 }
 
+func ensureOverwriteRenameDestinationReady(inode *fs.Inode) syscall.Errno {
+	if inode == nil {
+		return 0
+	}
+
+	node, ok := inode.Operations().(*WSNode)
+	if !ok {
+		return 0
+	}
+
+	node.mu.Lock()
+	defer node.mu.Unlock()
+
+	if node.isDirtyLocked() {
+		logging.Warnf("Rename: refusing to overwrite dirty destination %s", node.Path())
+		return syscall.EBUSY
+	}
+
+	return 0
+}
+
+func invalidateOverwrittenRenameDestination(inode *fs.Inode, path string) {
+	if inode == nil {
+		return
+	}
+
+	node, ok := inode.Operations().(*WSNode)
+	if !ok {
+		return
+	}
+
+	node.mu.Lock()
+	node.resetBufferLocked()
+	node.buf.ReplaceOnFirstWrite = false
+	node.allowPostCreateTimestamps = false
+	node.metadataCheckedAt = time.Time{}
+	node.mu.Unlock()
+
+	notifyContentIfPossible(inode, path)
+}
+
 func refreshRenamedNode(ctx context.Context, wfClient databricks.WorkspaceFilesAPI, inode *fs.Inode, visiblePath string, actualPath string) {
 	if inode == nil {
 		return
@@ -499,6 +540,10 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 	}
 
 	childInode := n.GetChild(name)
+	destChildInode := newParentNode.GetChild(newName)
+	if destChildInode == childInode {
+		destChildInode = nil
+	}
 
 	opCtx, cancel := context.WithTimeout(ctx, metadataOpTimeout)
 	defer cancel()
@@ -521,6 +566,9 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 			return errno
 		}
 	}
+	if errno := ensureOverwriteRenameDestinationReady(destChildInode); errno != 0 {
+		return errno
+	}
 
 	err = n.wfClient.Rename(opCtx, oldPath, newPath)
 	if err != nil {
@@ -531,6 +579,7 @@ func (n *WSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbe
 	actualOldPath := wsInfo.Path
 	actualNewPath := renameTargetPath(wsInfo, newPath)
 	n.deleteDiskCacheEntries(actualOldPath, actualNewPath)
+	invalidateOverwrittenRenameDestination(destChildInode, newPath)
 
 	if childInode != nil {
 		if !wsInfo.IsDir() {
